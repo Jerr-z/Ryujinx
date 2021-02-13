@@ -3,6 +3,7 @@ using LibHac;
 using LibHac.Account;
 using LibHac.Common;
 using LibHac.Fs;
+using LibHac.Fs.Fsa;
 using LibHac.Fs.Shim;
 using LibHac.FsSystem;
 using LibHac.FsSystem.NcaUtils;
@@ -12,6 +13,7 @@ using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.Common.Utilities;
 using Ryujinx.HLE.FileSystem;
+using Ryujinx.HLE.HOS;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -45,19 +47,19 @@ namespace Ryujinx.Ui
 
             MenuItem openSaveUserDir = new MenuItem("Open User Save Directory")
             {
-                Sensitive   = !Util.IsEmpty(controlData.ByteSpan) && controlData.Value.UserAccountSaveDataSize > 0,
+                Sensitive   = !Utilities.IsEmpty(controlData.ByteSpan) && controlData.Value.UserAccountSaveDataSize > 0,
                 TooltipText = "Open the directory which contains Application's User Saves."
             };
 
             MenuItem openSaveDeviceDir = new MenuItem("Open Device Save Directory")
             {
-                Sensitive   = !Util.IsEmpty(controlData.ByteSpan) && controlData.Value.DeviceSaveDataSize > 0,
+                Sensitive   = !Utilities.IsEmpty(controlData.ByteSpan) && controlData.Value.DeviceSaveDataSize > 0,
                 TooltipText = "Open the directory which contains Application's Device Saves."
             };
 
             MenuItem openSaveBcatDir = new MenuItem("Open BCAT Save Directory")
             {
-                Sensitive   = !Util.IsEmpty(controlData.ByteSpan) && controlData.Value.BcatDeliveryCacheStorageSize > 0,
+                Sensitive   = !Utilities.IsEmpty(controlData.ByteSpan) && controlData.Value.BcatDeliveryCacheStorageSize > 0,
                 TooltipText = "Open the directory which contains Application's BCAT Saves."
             };
 
@@ -109,22 +111,34 @@ namespace Ryujinx.Ui
 
             MenuItem managePtcMenu = new MenuItem("Cache Management");
 
-            MenuItem purgePtcCache = new MenuItem("Purge PPTC cache")
+            MenuItem purgePtcCache = new MenuItem("Purge PPTC Cache")
             {
                 TooltipText = "Delete the Application's PPTC cache."
             };
-            
-            MenuItem openPtcDir = new MenuItem("Open PPTC directory")
+
+            MenuItem purgeShaderCache = new MenuItem("Purge Shader Cache")
             {
-                TooltipText = "Open the directory which contains Application's PPTC cache."
+                TooltipText = "Delete the Application's shader cache."
             };
+
+            MenuItem openPtcDir = new MenuItem("Open PPTC Directory")
+            {
+                TooltipText = "Open the directory which contains the Application's PPTC cache."
+            };
+
+            MenuItem openShaderCacheDir = new MenuItem("Open Shader Cache Directory")
+            {
+                TooltipText = "Open the directory which contains the Application's shader cache."
+            };
+
+            Menu manageSubMenu = new Menu();
             
-            Menu managePtcSubMenu = new Menu();
+            manageSubMenu.Append(purgePtcCache);
+            manageSubMenu.Append(purgeShaderCache);
+            manageSubMenu.Append(openPtcDir);
+            manageSubMenu.Append(openShaderCacheDir);
             
-            managePtcSubMenu.Append(purgePtcCache);
-            managePtcSubMenu.Append(openPtcDir);
-            
-            managePtcMenu.Submenu = managePtcSubMenu;
+            managePtcMenu.Submenu = manageSubMenu;
 
             openSaveUserDir.Activated    += OpenSaveUserDir_Clicked;
             openSaveDeviceDir.Activated  += OpenSaveDeviceDir_Clicked;
@@ -136,8 +150,10 @@ namespace Ryujinx.Ui
             extractExeFs.Activated       += ExtractExeFs_Clicked;
             extractLogo.Activated        += ExtractLogo_Clicked;
             purgePtcCache.Activated      += PurgePtcCache_Clicked;
+            purgeShaderCache.Activated   += PurgeShaderCache_Clicked;
             openPtcDir.Activated         += OpenPtcDir_Clicked;
-            
+            openShaderCacheDir.Activated += OpenShaderCacheDir_Clicked;
+
             this.Add(openSaveUserDir);
             this.Add(openSaveDeviceDir);
             this.Add(openSaveBcatDir);
@@ -175,7 +191,7 @@ namespace Ryujinx.Ui
 
                 ref ApplicationControlProperty control = ref controlHolder.Value;
 
-                if (LibHac.Util.IsEmpty(controlHolder.ByteSpan))
+                if (LibHac.Utilities.IsEmpty(controlHolder.ByteSpan))
                 {
                     // If the current application doesn't have a loaded control property, create a dummy one
                     // and set the savedata sizes so a user savedata will be created.
@@ -191,7 +207,7 @@ namespace Ryujinx.Ui
 
                 Uid user = new Uid(1, 0);
 
-                result = EnsureApplicationSaveData(_virtualFileSystem.FsClient, out _, new TitleId(titleId), ref control, ref user);
+                result = EnsureApplicationSaveData(_virtualFileSystem.FsClient, out _, new LibHac.Ncm.ApplicationId(titleId), ref control, ref user);
 
                 if (result.IsFailure())
                 {
@@ -245,7 +261,7 @@ namespace Ryujinx.Ui
             return workingPath;
         }
 
-        private void ExtractSection(NcaSectionType ncaSectionType)
+        private void ExtractSection(NcaSectionType ncaSectionType, int programIndex = 0)
         {
             FileChooserDialog fileChooser = new FileChooserDialog("Choose the folder to extract into", null, FileChooserAction.SelectFolder, "Cancel", ResponseType.Cancel, "Extract", ResponseType.Accept);
             fileChooser.SetPosition(WindowPosition.Center);
@@ -339,36 +355,12 @@ namespace Ryujinx.Ui
                             return;
                         }
 
-                        string titleUpdateMetadataPath = System.IO.Path.Combine(_virtualFileSystem.GetBasePath(), "games", mainNca.Header.TitleId.ToString("x16"), "updates.json");
 
-                        if (File.Exists(titleUpdateMetadataPath))
+                        (Nca updatePatchNca, _) = ApplicationLoader.GetGameUpdateData(_virtualFileSystem, mainNca.Header.TitleId.ToString("x16"), programIndex, out _);
+
+                        if (updatePatchNca != null)
                         {
-                            string updatePath = JsonHelper.DeserializeFromFile<TitleUpdateMetadata>(titleUpdateMetadataPath).Selected;
-
-                            if (File.Exists(updatePath))
-                            {
-                                FileStream updateFile = new FileStream(updatePath, FileMode.Open, FileAccess.Read);
-                                PartitionFileSystem nsp = new PartitionFileSystem(updateFile.AsStorage());
-
-                                _virtualFileSystem.ImportTickets(nsp);
-
-                                foreach (DirectoryEntryEx fileEntry in nsp.EnumerateEntries("/", "*.nca"))
-                                {
-                                    nsp.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-
-                                    Nca nca = new Nca(_virtualFileSystem.KeySet, ncaFile.AsStorage());
-
-                                    if ($"{nca.Header.TitleId.ToString("x16")[..^3]}000" != mainNca.Header.TitleId.ToString("x16"))
-                                    {
-                                        break;
-                                    }
-
-                                    if (nca.Header.ContentType == NcaContentType.Program)
-                                    {
-                                        patchNca = nca;
-                                    }
-                                }
-                            }
+                            patchNca = updatePatchNca;
                         }
 
                         int index = Nca.GetSectionIndexFromType(ncaSectionType, mainNca.Header.ContentType);
@@ -539,7 +531,7 @@ namespace Ryujinx.Ui
 
         private void OpenSaveDir(string titleName, ulong titleId, SaveDataFilter filter)
         {
-            filter.SetProgramId(new TitleId(titleId));
+            filter.SetProgramId(new ProgramId(titleId));
 
             if (!TryFindSaveData(titleName, titleId, _controlData, filter, out ulong saveDataId))
             {
@@ -614,7 +606,7 @@ namespace Ryujinx.Ui
         {
             string titleId = _gameTableStore.GetValue(_rowIter, 2).ToString().Split("\n")[1].ToLower();
 
-            var modsBasePath = _virtualFileSystem.GetBaseModsPath();
+            var modsBasePath = _virtualFileSystem.ModLoader.GetModsBasePath();
             var titleModsPath = _virtualFileSystem.ModLoader.GetTitleDir(modsBasePath, titleId);
 
             Process.Start(new ProcessStartInfo
@@ -643,7 +635,7 @@ namespace Ryujinx.Ui
         private void OpenPtcDir_Clicked(object sender, EventArgs args)
         {
             string titleId = _gameTableStore.GetValue(_rowIter, 2).ToString().Split("\n")[1].ToLower();
-            string ptcDir  = System.IO.Path.Combine(_virtualFileSystem.GetBasePath(), "games", titleId, "cache", "cpu");
+            string ptcDir  = System.IO.Path.Combine(AppDataManager.GamesDirPath, titleId, "cache", "cpu");
             
             string mainPath   = System.IO.Path.Combine(ptcDir, "0");
             string backupPath = System.IO.Path.Combine(ptcDir, "1");
@@ -662,14 +654,32 @@ namespace Ryujinx.Ui
                 Verb            = "open"
             });
         }
+
+        private void OpenShaderCacheDir_Clicked(object sender, EventArgs args)
+        {
+            string titleId        = _gameTableStore.GetValue(_rowIter, 2).ToString().Split("\n")[1].ToLower();
+            string shaderCacheDir = System.IO.Path.Combine(AppDataManager.GamesDirPath, titleId, "cache", "shader");
+
+            if (!Directory.Exists(shaderCacheDir))
+            {
+                Directory.CreateDirectory(shaderCacheDir);
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName        = shaderCacheDir,
+                UseShellExecute = true,
+                Verb            = "open"
+            });
+        }
         
         private void PurgePtcCache_Clicked(object sender, EventArgs args)
         {
             string[] tableEntry = _gameTableStore.GetValue(_rowIter, 2).ToString().Split("\n");
             string titleId = tableEntry[1].ToLower();
             
-            DirectoryInfo mainDir   = new DirectoryInfo(System.IO.Path.Combine(_virtualFileSystem.GetBasePath(), "games", titleId, "cache", "cpu", "0"));
-            DirectoryInfo backupDir = new DirectoryInfo(System.IO.Path.Combine(_virtualFileSystem.GetBasePath(), "games", titleId, "cache", "cpu", "1"));
+            DirectoryInfo mainDir   = new DirectoryInfo(System.IO.Path.Combine(AppDataManager.GamesDirPath, titleId, "cache", "cpu", "0"));
+            DirectoryInfo backupDir = new DirectoryInfo(System.IO.Path.Combine(AppDataManager.GamesDirPath, titleId, "cache", "cpu", "1"));
             
             MessageDialog warningDialog = new MessageDialog(null, DialogFlags.Modal, MessageType.Warning, ButtonsType.YesNo, null)
             {
@@ -694,6 +704,42 @@ namespace Ryujinx.Ui
                     catch(Exception e)
                     {
                         Logger.Error?.Print(LogClass.Application, $"Error purging PPTC cache {file.Name}: {e}");
+                    }
+                }
+            }
+
+            warningDialog.Dispose();
+        }
+
+        private void PurgeShaderCache_Clicked(object sender, EventArgs args)
+        {
+            string[] tableEntry = _gameTableStore.GetValue(_rowIter, 2).ToString().Split("\n");
+            string titleId = tableEntry[1].ToLower();
+
+            DirectoryInfo shaderCacheDir = new DirectoryInfo(System.IO.Path.Combine(AppDataManager.GamesDirPath, titleId, "cache", "shader"));
+
+            MessageDialog warningDialog = new MessageDialog(null, DialogFlags.Modal, MessageType.Warning, ButtonsType.YesNo, null)
+            {
+                Title          = "Ryujinx - Warning",
+                Text           = $"You are about to delete the shader cache for '{tableEntry[0]}'. Are you sure you want to proceed?",
+                WindowPosition = WindowPosition.Center
+            };
+
+            List<DirectoryInfo> cacheDirectory = new List<DirectoryInfo>();
+
+            if (shaderCacheDir.Exists) { cacheDirectory.AddRange(shaderCacheDir.EnumerateDirectories("*")); }
+
+            if (cacheDirectory.Count > 0 && warningDialog.Run() == (int)ResponseType.Yes)
+            {
+                foreach (DirectoryInfo directory in cacheDirectory)
+                {
+                    try
+                    {
+                        directory.Delete(true);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Error?.Print(LogClass.Application, $"Error purging shader cache {directory.Name}: {e}");
                     }
                 }
             }

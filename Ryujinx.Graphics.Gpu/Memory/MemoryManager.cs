@@ -125,6 +125,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             lock (_pageTable)
             {
+                MemoryUnmapped?.Invoke(this, new UnmapEventArgs(va, size));
+
                 for (ulong offset = 0; offset < size; offset += PageSize)
                 {
                     SetPte(va + offset, pa + offset);
@@ -201,6 +203,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             lock (_pageTable)
             {
+                MemoryUnmapped?.Invoke(this, new UnmapEventArgs(va, size));
+
                 for (ulong offset = 0; offset < size; offset += PageSize)
                 {
                     if (IsPageInUse(va + offset))
@@ -308,6 +312,16 @@ namespace Ryujinx.Graphics.Gpu.Memory
             }
 
             return PteUnmapped;
+        }
+
+        /// <summary>
+        /// Checks if a given page is mapped.
+        /// </summary>
+        /// <param name="gpuVa">GPU virtual address of the page to check</param>
+        /// <returns>True if the page is mapped, false otherwise</returns>
+        public bool IsMapped(ulong gpuVa)
+        {
+            return Translate(gpuVa) != PteUnmapped;
         }
 
         /// <summary>

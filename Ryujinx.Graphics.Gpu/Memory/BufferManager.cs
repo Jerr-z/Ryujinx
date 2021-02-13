@@ -2,7 +2,10 @@ using Ryujinx.Common;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu.State;
 using Ryujinx.Graphics.Shader;
+using Ryujinx.Memory.Range;
 using System;
+using System.Collections.ObjectModel;
+using System.Linq;
 
 namespace Ryujinx.Graphics.Gpu.Memory
 {
@@ -11,6 +14,8 @@ namespace Ryujinx.Graphics.Gpu.Memory
     /// </summary>
     class BufferManager
     {
+        private const int StackToHeapThreshold = 16;
+
         private const int OverlapsBufferInitialCapacity = 10;
         private const int OverlapsBufferMaxCapacity     = 10000;
 
@@ -27,21 +32,61 @@ namespace Ryujinx.Graphics.Gpu.Memory
         private VertexBuffer[] _vertexBuffers;
         private BufferBounds[] _transformFeedbackBuffers;
 
+        /// <summary>
+        /// Holds shader stage buffer state and binding information.
+        /// </summary>
         private class BuffersPerStage
         {
-            public uint EnableMask { get; set; }
+            /// <summary>
+            /// Shader buffer binding information.
+            /// </summary>
+            public BufferDescriptor[] Bindings { get; }
 
+            /// <summary>
+            /// Buffer regions.
+            /// </summary>
             public BufferBounds[] Buffers { get; }
 
+            /// <summary>
+            /// Total amount of buffers used on the shader.
+            /// </summary>
+            public int Count { get; private set; }
+
+            /// <summary>
+            /// Creates a new instance of the shader stage buffer information.
+            /// </summary>
+            /// <param name="count">Maximum amount of buffers that the shader stage can use</param>
             public BuffersPerStage(int count)
             {
+                Bindings = new BufferDescriptor[count];
                 Buffers = new BufferBounds[count];
             }
 
-            public void Bind(int index, ulong address, ulong size)
+            /// <summary>
+            /// Sets the region of a buffer at a given slot.
+            /// </summary>
+            /// <param name="index">Buffer slot</param>
+            /// <param name="address">Region virtual address</param>
+            /// <param name="size">Region size in bytes</param>
+            public void SetBounds(int index, ulong address, ulong size)
             {
-                Buffers[index].Address = address;
-                Buffers[index].Size    = size;
+                Buffers[index] = new BufferBounds(address, size);
+            }
+
+            /// <summary>
+            /// Sets shader buffer binding information.
+            /// </summary>
+            /// <param name="descriptors">Buffer binding information</param>
+            public void SetBindings(ReadOnlyCollection<BufferDescriptor> descriptors)
+            {
+                if (descriptors == null)
+                {
+                    Count = 0;
+                    return;
+                }
+
+                descriptors.CopyTo(Bindings, 0);
+                Count = descriptors.Count;
             }
         }
 
@@ -49,6 +94,11 @@ namespace Ryujinx.Graphics.Gpu.Memory
         private BuffersPerStage   _cpUniformBuffers;
         private BuffersPerStage[] _gpStorageBuffers;
         private BuffersPerStage[] _gpUniformBuffers;
+
+        private int _cpStorageBufferBindings;
+        private int _cpUniformBufferBindings;
+        private int _gpStorageBufferBindings;
+        private int _gpUniformBufferBindings;
 
         private bool _gpStorageBuffersDirty;
         private bool _gpUniformBuffersDirty;
@@ -147,13 +197,18 @@ namespace Ryujinx.Graphics.Gpu.Memory
             }
         }
 
+        /// <summary>
+        /// Sets a transform feedback buffer on the graphics pipeline.
+        /// The output from the vertex transformation stages are written into the feedback buffer.
+        /// </summary>
+        /// <param name="index">Index of the transform feedback buffer</param>
+        /// <param name="gpuVa">Start GPU virtual address of the buffer</param>
+        /// <param name="size">Size in bytes of the transform feedback buffer</param>
         public void SetTransformFeedbackBuffer(int index, ulong gpuVa, ulong size)
         {
             ulong address = TranslateAndCreateBuffer(gpuVa, size);
 
-            _transformFeedbackBuffers[index].Address = address;
-            _transformFeedbackBuffers[index].Size    = size;
-
+            _transformFeedbackBuffers[index] = new BufferBounds(address, size);
             _transformFeedbackBuffersDirty = true;
         }
 
@@ -172,7 +227,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
 
             ulong address = TranslateAndCreateBuffer(gpuVa, size);
 
-            _cpStorageBuffers.Bind(index, address, size);
+            _cpStorageBuffers.SetBounds(index, address, size);
         }
 
         /// <summary>
@@ -197,7 +252,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                 _gpStorageBuffersDirty = true;
             }
 
-            _gpStorageBuffers[stage].Bind(index, address, size);
+            _gpStorageBuffers[stage].SetBounds(index, address, size);
         }
 
         /// <summary>
@@ -211,7 +266,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             ulong address = TranslateAndCreateBuffer(gpuVa, size);
 
-            _cpUniformBuffers.Bind(index, address, size);
+            _cpUniformBuffers.SetBounds(index, address, size);
         }
 
         /// <summary>
@@ -226,42 +281,48 @@ namespace Ryujinx.Graphics.Gpu.Memory
         {
             ulong address = TranslateAndCreateBuffer(gpuVa, size);
 
-            _gpUniformBuffers[stage].Bind(index, address, size);
-
+            _gpUniformBuffers[stage].SetBounds(index, address, size);
             _gpUniformBuffersDirty = true;
         }
 
         /// <summary>
-        /// Sets the enabled storage buffers mask on the compute pipeline.
-        /// Each bit set on the mask indicates that the respective buffer index is enabled.
+        /// Sets the binding points for the storage buffers bound on the compute pipeline.
         /// </summary>
-        /// <param name="mask">Buffer enable mask</param>
-        public void SetComputeStorageBufferEnableMask(uint mask)
+        /// <param name="descriptors">Buffer descriptors with the binding point values</param>
+        public void SetComputeStorageBufferBindings(ReadOnlyCollection<BufferDescriptor> descriptors)
         {
-            _cpStorageBuffers.EnableMask = mask;
+            _cpStorageBuffers.SetBindings(descriptors);
+            _cpStorageBufferBindings = descriptors.Count != 0 ? descriptors.Max(x => x.Binding) + 1 : 0;
         }
 
         /// <summary>
-        /// Sets the enabled storage buffers mask on the graphics pipeline.
-        /// Each bit set on the mask indicates that the respective buffer index is enabled.
+        /// Sets the binding points for the storage buffers bound on the graphics pipeline.
         /// </summary>
         /// <param name="stage">Index of the shader stage</param>
-        /// <param name="mask">Buffer enable mask</param>
-        public void SetGraphicsStorageBufferEnableMask(int stage, uint mask)
+        /// <param name="descriptors">Buffer descriptors with the binding point values</param>
+        public void SetGraphicsStorageBufferBindings(int stage, ReadOnlyCollection<BufferDescriptor> descriptors)
         {
-            _gpStorageBuffers[stage].EnableMask = mask;
-
+            _gpStorageBuffers[stage].SetBindings(descriptors);
             _gpStorageBuffersDirty = true;
         }
 
         /// <summary>
-        /// Sets the enabled uniform buffers mask on the compute pipeline.
-        /// Each bit set on the mask indicates that the respective buffer index is enabled.
+        /// Sets the total number of storage buffer bindings used.
         /// </summary>
-        /// <param name="mask">Buffer enable mask</param>
-        public void SetComputeUniformBufferEnableMask(uint mask)
+        /// <param name="count">Number of storage buffer bindings used</param>
+        public void SetGraphicsStorageBufferBindingsCount(int count)
         {
-            _cpUniformBuffers.EnableMask = mask;
+            _gpStorageBufferBindings = count;
+        }
+
+        /// <summary>
+        /// Sets the binding points for the uniform buffers bound on the compute pipeline.
+        /// </summary>
+        /// <param name="descriptors">Buffer descriptors with the binding point values</param>
+        public void SetComputeUniformBufferBindings(ReadOnlyCollection<BufferDescriptor> descriptors)
+        {
+            _cpUniformBuffers.SetBindings(descriptors);
+            _cpUniformBufferBindings = descriptors.Count != 0 ? descriptors.Max(x => x.Binding) + 1 : 0;
         }
 
         /// <summary>
@@ -269,12 +330,59 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// Each bit set on the mask indicates that the respective buffer index is enabled.
         /// </summary>
         /// <param name="stage">Index of the shader stage</param>
-        /// <param name="mask">Buffer enable mask</param>
-        public void SetGraphicsUniformBufferEnableMask(int stage, uint mask)
+        /// <param name="descriptors">Buffer descriptors with the binding point values</param>
+        public void SetGraphicsUniformBufferBindings(int stage, ReadOnlyCollection<BufferDescriptor> descriptors)
         {
-            _gpUniformBuffers[stage].EnableMask = mask;
-
+            _gpUniformBuffers[stage].SetBindings(descriptors);
             _gpUniformBuffersDirty = true;
+        }
+
+        /// <summary>
+        /// Sets the total number of uniform buffer bindings used.
+        /// </summary>
+        /// <param name="count">Number of uniform buffer bindings used</param>
+        public void SetGraphicsUniformBufferBindingsCount(int count)
+        {
+            _gpUniformBufferBindings = count;
+        }
+
+        /// <summary>
+        /// Gets a bit mask indicating which compute uniform buffers are currently bound.
+        /// </summary>
+        /// <returns>Mask where each bit set indicates a bound constant buffer</returns>
+        public uint GetComputeUniformBufferUseMask()
+        {
+            uint mask = 0;
+
+            for (int i = 0; i < _cpUniformBuffers.Buffers.Length; i++)
+            {
+                if (_cpUniformBuffers.Buffers[i].Address != 0)
+                {
+                    mask |= 1u << i;
+                }
+            }
+
+            return mask;
+        }
+
+        /// <summary>
+        /// Gets a bit mask indicating which graphics uniform buffers are currently bound.
+        /// </summary>
+        /// <param name="stage">Index of the shader stage</param>
+        /// <returns>Mask where each bit set indicates a bound constant buffer</returns>
+        public uint GetGraphicsUniformBufferUseMask(int stage)
+        {
+            uint mask = 0;
+
+            for (int i = 0; i < _gpUniformBuffers[stage].Buffers.Length; i++)
+            {
+                if (_gpUniformBuffers[stage].Buffers[i].Address != 0)
+                {
+                    mask |= 1u << i;
+                }
+            }
+
+            return mask;
         }
 
         /// <summary>
@@ -361,6 +469,7 @@ namespace Ryujinx.Graphics.Gpu.Memory
                     }
 
                     Buffer newBuffer = new Buffer(_context, address, endAddress - address);
+                    newBuffer.SynchronizeMemory(address, endAddress - address);
 
                     _buffers.Add(newBuffer);
 
@@ -428,47 +537,41 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// </summary>
         public void CommitComputeBindings()
         {
-            uint enableMask = _cpStorageBuffers.EnableMask;
+            int sCount = _cpStorageBufferBindings;
 
-            for (int index = 0; (enableMask >> index) != 0; index++)
+            Span<BufferRange> sRanges = sCount < StackToHeapThreshold ? stackalloc BufferRange[sCount] : new BufferRange[sCount];
+
+            for (int index = 0; index < _cpStorageBuffers.Count; index++)
             {
-                if ((enableMask & (1u << index)) == 0)
+                ref var bindingInfo = ref _cpStorageBuffers.Bindings[index];
+
+                BufferBounds bounds = _cpStorageBuffers.Buffers[bindingInfo.Slot];
+
+                if (bounds.Address != 0)
                 {
-                    continue;
+                    sRanges[bindingInfo.Binding] = GetBufferRange(bounds.Address, bounds.Size);
                 }
-
-                BufferBounds bounds = _cpStorageBuffers.Buffers[index];
-
-                if (bounds.Address == 0)
-                {
-                    continue;
-                }
-
-                BufferRange buffer = GetBufferRange(bounds.Address, bounds.Size);
-
-                _context.Renderer.Pipeline.SetStorageBuffer(index, ShaderStage.Compute, buffer);
             }
 
-            enableMask = _cpUniformBuffers.EnableMask;
+            _context.Renderer.Pipeline.SetStorageBuffers(sRanges);
 
-            for (int index = 0; (enableMask >> index) != 0; index++)
+            int uCount = _cpUniformBufferBindings;
+
+            Span<BufferRange> uRanges = uCount < StackToHeapThreshold ? stackalloc BufferRange[uCount] : new BufferRange[uCount];
+
+            for (int index = 0; index < _cpUniformBuffers.Count; index++)
             {
-                if ((enableMask & (1u << index)) == 0)
+                ref var bindingInfo = ref _cpUniformBuffers.Bindings[index];
+
+                BufferBounds bounds = _cpUniformBuffers.Buffers[bindingInfo.Slot];
+
+                if (bounds.Address != 0)
                 {
-                    continue;
+                    uRanges[bindingInfo.Binding] = GetBufferRange(bounds.Address, bounds.Size);
                 }
-
-                BufferBounds bounds = _cpUniformBuffers.Buffers[index];
-
-                if (bounds.Address == 0)
-                {
-                    continue;
-                }
-
-                BufferRange buffer = GetBufferRange(bounds.Address, bounds.Size);
-
-                _context.Renderer.Pipeline.SetUniformBuffer(index, ShaderStage.Compute, buffer);
             }
+
+            _context.Renderer.Pipeline.SetUniformBuffers(uRanges);
 
             // Force rebind after doing compute work.
             _rebind = true;
@@ -539,21 +642,22 @@ namespace Ryujinx.Graphics.Gpu.Memory
             {
                 _transformFeedbackBuffersDirty = false;
 
+                Span<BufferRange> tfbs = stackalloc BufferRange[Constants.TotalTransformFeedbackBuffers];
+
                 for (int index = 0; index < Constants.TotalTransformFeedbackBuffers; index++)
                 {
                     BufferBounds tfb = _transformFeedbackBuffers[index];
 
                     if (tfb.Address == 0)
                     {
-                        _context.Renderer.Pipeline.SetTransformFeedbackBuffer(index, new BufferRange(BufferHandle.Null, 0, 0));
-
+                        tfbs[index] = BufferRange.Empty;
                         continue;
                     }
 
-                    BufferRange buffer = GetBufferRange(tfb.Address, tfb.Size);
-
-                    _context.Renderer.Pipeline.SetTransformFeedbackBuffer(index, buffer);
+                    tfbs[index] = GetBufferRange(tfb.Address, tfb.Size);
                 }
+
+                _context.Renderer.Pipeline.SetTransformFeedbackBuffers(tfbs);
             }
             else
             {
@@ -602,7 +706,35 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="isStorage">True to bind as storage buffer, false to bind as uniform buffers</param>
         private void BindBuffers(BuffersPerStage[] bindings, bool isStorage)
         {
-            BindOrUpdateBuffers(bindings, bind: true, isStorage);
+            int count = isStorage ? _gpStorageBufferBindings : _gpUniformBufferBindings;
+
+            Span<BufferRange> ranges = count < StackToHeapThreshold ? stackalloc BufferRange[count] : new BufferRange[count];
+
+            for (ShaderStage stage = ShaderStage.Vertex; stage <= ShaderStage.Fragment; stage++)
+            {
+                ref var buffers = ref bindings[(int)stage - 1];
+
+                for (int index = 0; index < buffers.Count; index++)
+                {
+                    ref var bindingInfo = ref buffers.Bindings[index];
+
+                    BufferBounds bounds = buffers.Buffers[bindingInfo.Slot];
+
+                    if (bounds.Address != 0)
+                    {
+                        ranges[bindingInfo.Binding] = GetBufferRange(bounds.Address, bounds.Size);
+                    }
+                }
+            }
+
+            if (isStorage)
+            {
+                _context.Renderer.Pipeline.SetStorageBuffers(ranges);
+            }
+            else
+            {
+                _context.Renderer.Pipeline.SetUniformBuffers(ranges);
+            }
         }
 
         /// <summary>
@@ -611,70 +743,23 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="bindings">Bindings to update</param>
         private void UpdateBuffers(BuffersPerStage[] bindings)
         {
-            BindOrUpdateBuffers(bindings, bind: false);
-        }
-
-        /// <summary>
-        /// This binds buffers into the host API, or updates data for already bound buffers.
-        /// </summary>
-        /// <param name="bindings">Bindings to bind or update</param>
-        /// <param name="bind">True to bind, false to update</param>
-        /// <param name="isStorage">True to bind as storage buffer, false to bind as uniform buffer</param>
-        private void BindOrUpdateBuffers(BuffersPerStage[] bindings, bool bind, bool isStorage = false)
-        {
             for (ShaderStage stage = ShaderStage.Vertex; stage <= ShaderStage.Fragment; stage++)
             {
-                uint enableMask = bindings[(int)stage - 1].EnableMask;
+                ref var buffers = ref bindings[(int)stage - 1];
 
-                if (enableMask == 0)
+                for (int index = 0; index < buffers.Count; index++)
                 {
-                    continue;
-                }
+                    ref var binding = ref buffers.Bindings[index];
 
-                for (int index = 0; (enableMask >> index) != 0; index++)
-                {
-                    if ((enableMask & (1u << index)) == 0)
-                    {
-                        continue;
-                    }
-
-                    BufferBounds bounds = bindings[(int)stage - 1].Buffers[index];
+                    BufferBounds bounds = buffers.Buffers[binding.Slot];
 
                     if (bounds.Address == 0)
                     {
                         continue;
                     }
 
-                    if (bind)
-                    {
-                        BindBuffer(index, stage, bounds, isStorage);
-                    }
-                    else
-                    {
-                        SynchronizeBufferRange(bounds.Address, bounds.Size);
-                    }
+                    SynchronizeBufferRange(bounds.Address, bounds.Size);
                 }
-            }
-        }
-
-        /// <summary>
-        /// Binds a buffer on the host API.
-        /// </summary>
-        /// <param name="index">Index to bind the buffer into</param>
-        /// <param name="stage">Shader stage to bind the buffer into</param>
-        /// <param name="bounds">Buffer address and size</param>
-        /// <param name="isStorage">True to bind as storage buffer, false to bind as uniform buffer</param>
-        private void BindBuffer(int index, ShaderStage stage, BufferBounds bounds, bool isStorage)
-        {
-            BufferRange buffer = GetBufferRange(bounds.Address, bounds.Size);
-
-            if (isStorage)
-            {
-                _context.Renderer.Pipeline.SetStorageBuffer(index, stage, buffer);
-            }
-            else
-            {
-                _context.Renderer.Pipeline.SetUniformBuffer(index, stage, buffer);
             }
         }
 

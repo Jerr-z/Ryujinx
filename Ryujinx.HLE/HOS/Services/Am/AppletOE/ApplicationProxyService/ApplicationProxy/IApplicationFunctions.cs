@@ -2,15 +2,16 @@ using LibHac;
 using LibHac.Account;
 using LibHac.Common;
 using LibHac.Fs;
-using LibHac.Ncm;
 using LibHac.Ns;
 using Ryujinx.Common;
 using Ryujinx.Common.Logging;
+using Ryujinx.HLE.Exceptions;
 using Ryujinx.HLE.HOS.Ipc;
 using Ryujinx.HLE.HOS.Kernel.Common;
 using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Threading;
 using Ryujinx.HLE.HOS.Services.Am.AppletAE.Storage;
+using Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy.Types;
 using Ryujinx.HLE.HOS.Services.Sdb.Pdm.QueryService;
 using Ryujinx.HLE.HOS.SystemState;
 using System;
@@ -18,6 +19,7 @@ using System.Numerics;
 
 using static LibHac.Fs.ApplicationSaveDataManagement;
 using AccountUid = Ryujinx.HLE.HOS.Services.Account.Acc.UserId;
+using ApplicationId = LibHac.Ncm.ApplicationId;
 
 namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.ApplicationProxy
 {
@@ -29,17 +31,41 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
 
         public IApplicationFunctions(Horizon system)
         {
-            _gpuErrorDetectedSystemEvent         = new KEvent(system.KernelContext);
+            _gpuErrorDetectedSystemEvent = new KEvent(system.KernelContext);
             _friendInvitationStorageChannelEvent = new KEvent(system.KernelContext);
-            _notificationStorageChannelEvent     = new KEvent(system.KernelContext);
+            _notificationStorageChannelEvent = new KEvent(system.KernelContext);
         }
 
         [Command(1)]
-        // PopLaunchParameter(u32) -> object<nn::am::service::IStorage>
+        // PopLaunchParameter(LaunchParameterKind kind) -> object<nn::am::service::IStorage>
         public ResultCode PopLaunchParameter(ServiceCtx context)
         {
-            // Only the first 0x18 bytes of the Data seems to be actually used.
-            MakeObject(context, new AppletAE.IStorage(StorageHelper.MakeLaunchParams(context.Device.System.State.Account.LastOpenedUser)));
+            LaunchParameterKind kind = (LaunchParameterKind)context.RequestData.ReadUInt32();
+
+            byte[] storageData;
+
+            switch (kind)
+            {
+                case LaunchParameterKind.UserChannel:
+                    storageData = context.Device.UserChannelPersistence.Pop();
+                    break;
+                case LaunchParameterKind.PreselectedUser:
+                    // Only the first 0x18 bytes of the Data seems to be actually used.
+                    storageData = StorageHelper.MakeLaunchParams(context.Device.System.State.Account.LastOpenedUser);
+                    break;
+                case LaunchParameterKind.Unknown:
+                    throw new NotImplementedException("Unknown LaunchParameterKind.");
+
+                default:
+                    return ResultCode.ObjectInvalid;
+            }
+
+            if (storageData == null)
+            {
+                return ResultCode.NotAvailable;
+            }
+
+            MakeObject(context, new AppletAE.IStorage(storageData));
 
             return ResultCode.Success;
         }
@@ -48,28 +74,28 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
         // EnsureSaveData(nn::account::Uid) -> u64
         public ResultCode EnsureSaveData(ServiceCtx context)
         {
-            Uid     userId  = context.RequestData.ReadStruct<AccountUid>().ToLibHacUid();
-            TitleId titleId = new TitleId(context.Process.TitleId);
+            Uid userId = context.RequestData.ReadStruct<AccountUid>().ToLibHacUid();
+            ApplicationId applicationId = new ApplicationId(context.Process.TitleId);
 
             BlitStruct<ApplicationControlProperty> controlHolder = context.Device.Application.ControlData;
 
             ref ApplicationControlProperty control = ref controlHolder.Value;
 
-            if (Util.IsEmpty(controlHolder.ByteSpan))
+            if (LibHac.Utilities.IsEmpty(controlHolder.ByteSpan))
             {
                 // If the current application doesn't have a loaded control property, create a dummy one
                 // and set the savedata sizes so a user savedata will be created.
                 control = ref new BlitStruct<ApplicationControlProperty>(1).Value;
 
                 // The set sizes don't actually matter as long as they're non-zero because we use directory savedata.
-                control.UserAccountSaveDataSize        = 0x4000;
+                control.UserAccountSaveDataSize = 0x4000;
                 control.UserAccountSaveDataJournalSize = 0x4000;
 
                 Logger.Warning?.Print(LogClass.ServiceAm,
                     "No control file was found for this game. Using a dummy one instead. This may cause inaccuracies in some games.");
             }
 
-            Result result = EnsureApplicationSaveData(context.Device.FileSystem.FsClient, out long requiredSize, titleId,
+            Result result = EnsureApplicationSaveData(context.Device.FileSystem.FsClient, out long requiredSize, applicationId,
                 ref control, ref userId);
 
             context.ResponseData.Write(requiredSize);
@@ -87,7 +113,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             // TODO: When above calls are implemented, switch to using ns:am
 
             long desiredLanguageCode = context.Device.System.State.DesiredLanguageCode;
-            
+
             int supportedLanguages = (int)context.Device.Application.ControlData.Value.SupportedLanguages;
             int firstSupported = BitOperations.TrailingZeroCount(supportedLanguages);
 
@@ -154,6 +180,52 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             return ResultCode.Success;
         }
 
+        [Command(30)]
+        // BeginBlockingHomeButtonShortAndLongPressed()
+        public ResultCode BeginBlockingHomeButtonShortAndLongPressed(ServiceCtx context)
+        {
+            // NOTE: This set two internal fields at offsets 0x89 and 0x8B to value 1 then it signals an internal event.
+
+            Logger.Stub?.PrintStub(LogClass.ServiceAm);
+
+            return ResultCode.Success;
+        }
+
+        [Command(31)]
+        // EndBlockingHomeButtonShortAndLongPressed()
+        public ResultCode EndBlockingHomeButtonShortAndLongPressed(ServiceCtx context)
+        {
+            // NOTE: This set two internal fields at offsets 0x89 and 0x8B to value 0 then it signals an internal event.
+
+            Logger.Stub?.PrintStub(LogClass.ServiceAm);
+
+            return ResultCode.Success;
+        }
+
+        [Command(32)] // 2.0.0+
+        // BeginBlockingHomeButton(u64 nano_second)
+        public ResultCode BeginBlockingHomeButton(ServiceCtx context)
+        {
+            ulong nanoSeconds = context.RequestData.ReadUInt64();
+
+            // NOTE: This set two internal fields at offsets 0x89 to value 1 and 0x90 to value of "nanoSeconds" then it signals an internal event.
+
+            Logger.Stub?.PrintStub(LogClass.ServiceAm, new { nanoSeconds });
+
+            return ResultCode.Success;
+        }
+
+        [Command(33)] // 2.0.0+
+        // EndBlockingHomeButton()
+        public ResultCode EndBlockingHomeButton(ServiceCtx context)
+        {
+            // NOTE: This set two internal fields at offsets 0x89 and 0x90 to value 0 then it signals an internal event.
+
+            Logger.Stub?.PrintStub(LogClass.ServiceAm);
+
+            return ResultCode.Success;
+        }
+
         [Command(40)]
         // NotifyRunning() -> b8
         public ResultCode NotifyRunning(ServiceCtx context)
@@ -210,10 +282,10 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
         // InitializeApplicationCopyrightFrameBuffer(s32 width, s32 height, handle<copy, transfer_memory> transfer_memory, u64 transfer_memory_size)
         public ResultCode InitializeApplicationCopyrightFrameBuffer(ServiceCtx context)
         {
-            int   width                 = context.RequestData.ReadInt32();
-            int   height                = context.RequestData.ReadInt32();
-            ulong transferMemorySize    = context.RequestData.ReadUInt64();
-            int   transferMemoryHandle  = context.Request.HandleDesc.ToCopy[0];
+            int width = context.RequestData.ReadInt32();
+            int height = context.RequestData.ReadInt32();
+            ulong transferMemorySize = context.RequestData.ReadUInt64();
+            int transferMemoryHandle = context.Request.HandleDesc.ToCopy[0];
             ulong transferMemoryAddress = context.Process.HandleTable.GetObject<KTransferMemory>(transferMemoryHandle).Address;
 
             ResultCode resultCode = ResultCode.InvalidParameters;
@@ -258,12 +330,12 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
         // SetApplicationCopyrightImage(buffer<bytes, 0x45> frame_buffer, s32 x, s32 y, s32 width, s32 height, s32 window_origin_mode)
         public ResultCode SetApplicationCopyrightImage(ServiceCtx context)
         {
-            long frameBufferPos   = context.Request.SendBuff[0].Position;
-            long frameBufferSize  = context.Request.SendBuff[0].Size;
-            int  x                = context.RequestData.ReadInt32();
-            int  y                = context.RequestData.ReadInt32();
-            int  width            = context.RequestData.ReadInt32();
-            int  height           = context.RequestData.ReadInt32();
+            long frameBufferPos = context.Request.SendBuff[0].Position;
+            long frameBufferSize = context.Request.SendBuff[0].Size;
+            int x = context.RequestData.ReadInt32();
+            int y = context.RequestData.ReadInt32();
+            int width = context.RequestData.ReadInt32();
+            int height = context.RequestData.ReadInt32();
             uint windowOriginMode = context.RequestData.ReadUInt32();
 
             ResultCode resultCode = ResultCode.InvalidParameters;
@@ -272,7 +344,7 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             {
                 ResultCode result = SetApplicationCopyrightImageImpl(x, y, width, height, frameBufferPos, frameBufferSize, windowOriginMode);
 
-                if (resultCode != ResultCode.Success)
+                if (result != ResultCode.Success)
                 {
                     resultCode = result;
                 }
@@ -330,14 +402,49 @@ namespace Ryujinx.HLE.HOS.Services.Am.AppletOE.ApplicationProxyService.Applicati
             return (ResultCode)QueryPlayStatisticsManager.GetPlayStatistics(context, true);
         }
 
+        [Command(120)] // 5.0.0+
+        // ExecuteProgram(ProgramSpecifyKind kind, u64 value)
+        public ResultCode ExecuteProgram(ServiceCtx context)
+        {
+            ProgramSpecifyKind kind = (ProgramSpecifyKind)context.RequestData.ReadUInt32();
+
+            // padding
+            context.RequestData.ReadUInt32();
+
+            ulong value = context.RequestData.ReadUInt64();
+
+            Logger.Stub?.PrintStub(LogClass.ServiceAm, new { kind, value });
+
+            context.Device.UiHandler.ExecuteProgram(context.Device, kind, value);
+
+            return ResultCode.Success;
+        }
+
+        [Command(121)] // 5.0.0+
+        // ClearUserChannel()
+        public ResultCode ClearUserChannel(ServiceCtx context)
+        {
+            context.Device.UserChannelPersistence.Clear();
+
+            return ResultCode.Success;
+        }
+
+        [Command(122)] // 5.0.0+
+        // UnpopToUserChannel(object<nn::am::service::IStorage> input_storage)
+        public ResultCode UnpopToUserChannel(ServiceCtx context)
+        {
+            AppletAE.IStorage data = GetObject<AppletAE.IStorage>(context, 0);
+
+            context.Device.UserChannelPersistence.Push(data.Data);
+
+            return ResultCode.Success;
+        }
+
         [Command(123)] // 5.0.0+
         // GetPreviousProgramIndex() -> s32 program_index
         public ResultCode GetPreviousProgramIndex(ServiceCtx context)
         {
-            // TODO: The output PreviousProgramIndex is -1 when there was no previous title.
-            //       When multi-process will be supported, return the last program index.
-
-            int previousProgramIndex = -1;
+            int previousProgramIndex = context.Device.UserChannelPersistence.PreviousIndex;
 
             context.ResponseData.Write(previousProgramIndex);
 

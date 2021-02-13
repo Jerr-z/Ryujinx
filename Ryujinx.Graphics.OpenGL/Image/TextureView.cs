@@ -134,7 +134,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
                     _incompatibleFormatView = (TextureView)_renderer.CreateTexture(Info, ScaleFactor);
                 }
 
-                TextureCopyUnscaled.Copy(_parent.Info, _incompatibleFormatView.Info, _parent.Handle, _incompatibleFormatView.Handle, FirstLayer, 0, FirstLevel, 0, ScaleFactor);
+                TextureCopyUnscaled.Copy(_parent.Info, _incompatibleFormatView.Info, _parent.Handle, _incompatibleFormatView.Handle, FirstLayer, 0, FirstLevel, 0);
 
                 return _incompatibleFormatView.Handle;
             }
@@ -146,7 +146,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
         {
             if (_incompatibleFormatView != null)
             {
-                TextureCopyUnscaled.Copy(_incompatibleFormatView.Info, _parent.Info, _incompatibleFormatView.Handle, _parent.Handle, 0, FirstLayer, 0, FirstLevel, ScaleFactor);
+                TextureCopyUnscaled.Copy(_incompatibleFormatView.Info, _parent.Info, _incompatibleFormatView.Handle, _parent.Handle, 0, FirstLayer, 0, FirstLevel);
             }
         }
 
@@ -154,7 +154,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
         {
             TextureView destinationView = (TextureView)destination;
 
-            TextureCopyUnscaled.Copy(Info, destinationView.Info, Handle, destinationView.Handle, 0, firstLayer, 0, firstLevel, ScaleFactor);
+            TextureCopyUnscaled.Copy(Info, destinationView.Info, Handle, destinationView.Handle, 0, firstLayer, 0, firstLevel);
 
             if (destinationView._emulatedViewParent != null)
             {
@@ -166,8 +166,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
                     0,
                     destinationView.FirstLayer,
                     0,
-                    destinationView.FirstLevel,
-                    ScaleFactor);
+                    destinationView.FirstLevel);
             }
         }
 
@@ -434,7 +433,7 @@ namespace Ryujinx.Graphics.OpenGL.Image
             throw new NotSupportedException();
         }
 
-        public void Dispose()
+        private void DisposeHandles()
         {
             if (_incompatibleFormatView != null)
             {
@@ -447,10 +446,38 @@ namespace Ryujinx.Graphics.OpenGL.Image
             {
                 GL.DeleteTexture(Handle);
 
-                _parent.DecrementViewsCount();
-
                 Handle = 0;
             }
+        }
+
+        /// <summary>
+        /// Release the view without necessarily disposing the parent if we are the default view.
+        /// This allows it to be added to the resource pool and reused later.
+        /// </summary>
+        public void Release()
+        {
+            bool hadHandle = Handle != 0;
+
+            if (_parent.DefaultView != this)
+            {
+                DisposeHandles();
+            }
+
+            if (hadHandle)
+            {
+                _parent.DecrementViewsCount();
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_parent.DefaultView == this)
+            {
+                // Remove the default view (us), so that the texture cannot be released to the cache.
+                _parent.DeleteDefault();
+            }
+
+            Release();
         }
     }
 }

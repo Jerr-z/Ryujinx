@@ -40,7 +40,9 @@ namespace Ryujinx.Ui
         [GUI] ComboBoxText    _graphicsDebugLevel;
         [GUI] CheckButton     _dockedModeToggle;
         [GUI] CheckButton     _discordToggle;
+        [GUI] CheckButton     _checkUpdatesToggle;
         [GUI] CheckButton     _vSyncToggle;
+        [GUI] CheckButton     _shaderCacheToggle;
         [GUI] CheckButton     _multiSchedToggle;
         [GUI] CheckButton     _ptcToggle;
         [GUI] CheckButton     _fsicToggle;
@@ -81,6 +83,7 @@ namespace Ryujinx.Ui
         [GUI] ToggleButton    _configureController7;
         [GUI] ToggleButton    _configureController8;
         [GUI] ToggleButton    _configureControllerH;
+
 #pragma warning restore CS0649, IDE0044
 
         public SettingsWindow(VirtualFileSystem virtualFileSystem, HLE.FileSystem.Content.ContentManager contentManager) : this(new Builder("Ryujinx.Ui.SettingsWindow.glade"), virtualFileSystem, contentManager) { }
@@ -170,9 +173,19 @@ namespace Ryujinx.Ui
                 _discordToggle.Click();
             }
 
+            if (ConfigurationState.Instance.CheckUpdatesOnStart)
+            {
+                _checkUpdatesToggle.Click();
+            }
+
             if (ConfigurationState.Instance.Graphics.EnableVsync)
             {
                 _vSyncToggle.Click();
+            }
+
+            if (ConfigurationState.Instance.Graphics.EnableShaderCache)
+            {
+                _shaderCacheToggle.Click();
             }
 
             if (ConfigurationState.Instance.System.EnableMulticoreScheduling)
@@ -478,21 +491,6 @@ namespace Ryujinx.Ui
             _browseThemePath.SetStateFlags(0, true);
         }
 
-        private void OpenLogsFolder_Pressed(object sender, EventArgs args)
-        {
-            string logPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-            
-            DirectoryInfo directory = new DirectoryInfo(logPath);
-            directory.Create();
-            
-            Process.Start(new ProcessStartInfo()
-            {
-                FileName        = logPath,
-                UseShellExecute = true,
-                Verb            = "open"
-            });
-        }
-
         private void ConfigureController_Pressed(object sender, EventArgs args, PlayerIndex playerIndex)
         {
             ((ToggleButton)sender).SetStateFlags(0, true);
@@ -534,7 +532,9 @@ namespace Ryujinx.Ui
             ConfigurationState.Instance.Logger.GraphicsDebugLevel.Value        = Enum.Parse<GraphicsDebugLevel>(_graphicsDebugLevel.ActiveId);
             ConfigurationState.Instance.System.EnableDockedMode.Value          = _dockedModeToggle.Active;
             ConfigurationState.Instance.EnableDiscordIntegration.Value         = _discordToggle.Active;
+            ConfigurationState.Instance.CheckUpdatesOnStart.Value              = _checkUpdatesToggle.Active;
             ConfigurationState.Instance.Graphics.EnableVsync.Value             = _vSyncToggle.Active;
+            ConfigurationState.Instance.Graphics.EnableShaderCache.Value       = _shaderCacheToggle.Active;
             ConfigurationState.Instance.System.EnableMulticoreScheduling.Value = _multiSchedToggle.Active;
             ConfigurationState.Instance.System.EnablePtc.Value                 = _ptcToggle.Active;
             ConfigurationState.Instance.System.EnableFsIntegrityChecks.Value   = _fsicToggle.Active;

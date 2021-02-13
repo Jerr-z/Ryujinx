@@ -67,6 +67,22 @@ namespace Ryujinx.Graphics.Gpu.Image
             }
             else
             {
+                if (texture.ChangedSize)
+                {
+                    // Texture changed size at one point - it may be a different size than the sampler expects.
+                    // This can be triggered when the size is changed by a size hint on copy or draw, but the texture has been sampled before.
+
+                    TextureDescriptor descriptor = GetDescriptor(id);
+
+                    int width = descriptor.UnpackWidth();
+                    int height = descriptor.UnpackHeight();
+
+                    if (texture.Info.Width != width || texture.Info.Height != height)
+                    {
+                        texture.ChangeSize(width, height, texture.Info.DepthOrLayers);
+                    }
+                }
+
                 // Memory is automatically synchronized on texture creation.
                 texture.SynchronizeMemory();
             }
@@ -143,6 +159,22 @@ namespace Ryujinx.Graphics.Gpu.Image
             bool isLinear = descriptorType == TextureDescriptorType.Linear;
 
             Target target = descriptor.UnpackTextureTarget().Convert((samplesInX | samplesInY) != 1);
+
+            // We use 2D targets for 1D textures as that makes texture cache
+            // management easier. We don't know the target for render target
+            // and copies, so those would normally use 2D targets, which are
+            // not compatible with 1D targets. By doing that we also allow those
+            // to match when looking for compatible textures on the cache.
+            if (target == Target.Texture1D)
+            {
+                target = Target.Texture2D;
+                height = 1;
+            }
+            else if (target == Target.Texture1DArray)
+            {
+                target = Target.Texture2DArray;
+                height = 1;
+            }
 
             uint format = descriptor.UnpackFormat();
             bool srgb   = descriptor.UnpackSrgb();

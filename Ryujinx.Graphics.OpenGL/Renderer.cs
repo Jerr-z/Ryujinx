@@ -1,4 +1,5 @@
-﻿using OpenTK.Graphics.OpenGL;
+using OpenTK.Graphics;
+using OpenTK.Graphics.OpenGL;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
@@ -21,7 +22,11 @@ namespace Ryujinx.Graphics.OpenGL
 
         public IWindow Window => _window;
 
-        internal TextureCopy TextureCopy { get; }
+        private TextureCopy _textureCopy;
+        private TextureCopy _backgroundTextureCopy;
+        internal TextureCopy TextureCopy => BackgroundContextWorker.InBackground ? _backgroundTextureCopy : _textureCopy;
+
+        internal ResourcePool ResourcePool { get; }
 
         public string GpuVendor { get; private set; }
         public string GpuRenderer { get; private set; }
@@ -32,12 +37,14 @@ namespace Ryujinx.Graphics.OpenGL
             _pipeline = new Pipeline();
             _counters = new Counters();
             _window = new Window(this);
-            TextureCopy = new TextureCopy(this);
+            _textureCopy = new TextureCopy(this);
+            _backgroundTextureCopy = new TextureCopy(this);
+            ResourcePool = new ResourcePool();
         }
 
-        public IShader CompileShader(ShaderProgram shader)
+        public IShader CompileShader(ShaderStage stage, string code)
         {
-            return new Shader(shader);
+            return new Shader(stage, code);
         }
 
         public BufferHandle CreateBuffer(int size)
@@ -57,7 +64,14 @@ namespace Ryujinx.Graphics.OpenGL
 
         public ITexture CreateTexture(TextureCreateInfo info, float scaleFactor)
         {
-            return info.Target == Target.TextureBuffer ? new TextureBuffer(info) : new TextureStorage(this, info, scaleFactor).CreateDefaultView();
+            if (info.Target == Target.TextureBuffer)
+            {
+                return new TextureBuffer(info);
+            }
+            else
+            {
+                return ResourcePool.GetTextureOrNull(info, scaleFactor) ?? new TextureStorage(this, info, scaleFactor).CreateDefaultView();
+            }
         }
 
         public void DeleteBuffer(BufferHandle buffer)
@@ -92,6 +106,11 @@ namespace Ryujinx.Graphics.OpenGL
             _counters.Update();
         }
 
+        public void PreFrame()
+        {
+            ResourcePool.Tick();
+        }
+
         public ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler)
         {
             return _counters.QueueReport(type, resultHandler);
@@ -120,12 +139,45 @@ namespace Ryujinx.Graphics.OpenGL
             _counters.QueueReset(type);
         }
 
+        public void BackgroundContextAction(Action action)
+        {
+            if (GraphicsContext.CurrentContext != null)
+            {
+                action(); // We have a context already - use that (assuming it is the main one).
+            }
+            else
+            {
+                _window.BackgroundContext.Invoke(action);
+            }
+        }
+
+        public void InitializeBackgroundContext(IGraphicsContext baseContext)
+        {
+            _window.InitializeBackgroundContext(baseContext);
+        }
+
         public void Dispose()
         {
-            TextureCopy.Dispose();
+            _textureCopy.Dispose();
+            _backgroundTextureCopy.Dispose();
+            ResourcePool.Dispose();
             _pipeline.Dispose();
             _window.Dispose();
             _counters.Dispose();
+        }
+
+        public IProgram LoadProgramBinary(byte[] programBinary)
+        {
+            Program program = new Program(programBinary);
+
+            if (program.IsLinked)
+            {
+                return program;
+            }
+
+            program.Dispose();
+
+            return null;
         }
     }
 }

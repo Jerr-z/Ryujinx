@@ -124,21 +124,12 @@ namespace ARMeilleure.Instructions
 
         private static void EmitReadInt(ArmEmitterContext context, Operand address, int rt, int size)
         {
-            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
-
-            Operand lblFastPath = Label();
             Operand lblSlowPath = Label();
             Operand lblEnd      = Label();
 
-            context.BranchIfFalse(lblFastPath, isUnalignedAddr);
+            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
 
-            context.MarkLabel(lblSlowPath);
-
-            EmitReadIntFallback(context, address, rt, size);
-
-            context.Branch(lblEnd);
-
-            context.MarkLabel(lblFastPath);
+            context.BranchIfTrue(lblSlowPath, isUnalignedAddr);
 
             Operand physAddr = EmitPtPointerLoad(context, address, lblSlowPath, write: false);
 
@@ -154,6 +145,12 @@ namespace ARMeilleure.Instructions
 
             SetInt(context, rt, value);
 
+            context.Branch(lblEnd);
+
+            context.MarkLabel(lblSlowPath, BasicBlockFrequency.Cold);
+
+            EmitReadIntFallback(context, address, rt, size);
+
             context.MarkLabel(lblEnd);
         }
 
@@ -168,7 +165,7 @@ namespace ARMeilleure.Instructions
 
             Operand lblFastPath = Label();
 
-            context.BranchIfFalse(lblFastPath, isUnalignedAddr);
+            context.BranchIfFalse(lblFastPath, isUnalignedAddr, BasicBlockFrequency.Cold);
 
             // The call is not expected to return (it should throw).
             context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)), address);
@@ -195,21 +192,12 @@ namespace ARMeilleure.Instructions
             int elem,
             int size)
         {
-            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
-
-            Operand lblFastPath = Label();
             Operand lblSlowPath = Label();
             Operand lblEnd      = Label();
 
-            context.BranchIfFalse(lblFastPath, isUnalignedAddr);
+            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
 
-            context.MarkLabel(lblSlowPath);
-
-            EmitReadVectorFallback(context, address, vector, rt, elem, size);
-
-            context.Branch(lblEnd);
-
-            context.MarkLabel(lblFastPath);
+            context.BranchIfTrue(lblSlowPath, isUnalignedAddr);
 
             Operand physAddr = EmitPtPointerLoad(context, address, lblSlowPath, write: false);
 
@@ -226,6 +214,12 @@ namespace ARMeilleure.Instructions
 
             context.Copy(GetVec(rt), value);
 
+            context.Branch(lblEnd);
+
+            context.MarkLabel(lblSlowPath, BasicBlockFrequency.Cold);
+
+            EmitReadVectorFallback(context, address, vector, rt, elem, size);
+
             context.MarkLabel(lblEnd);
         }
 
@@ -236,21 +230,12 @@ namespace ARMeilleure.Instructions
 
         private static void EmitWriteInt(ArmEmitterContext context, Operand address, int rt, int size)
         {
-            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
-
-            Operand lblFastPath = Label();
             Operand lblSlowPath = Label();
             Operand lblEnd      = Label();
 
-            context.BranchIfFalse(lblFastPath, isUnalignedAddr);
+            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
 
-            context.MarkLabel(lblSlowPath);
-
-            EmitWriteIntFallback(context, address, rt, size);
-
-            context.Branch(lblEnd);
-
-            context.MarkLabel(lblFastPath);
+            context.BranchIfTrue(lblSlowPath, isUnalignedAddr);
 
             Operand physAddr = EmitPtPointerLoad(context, address, lblSlowPath, write: true);
 
@@ -269,6 +254,12 @@ namespace ARMeilleure.Instructions
                 case 3: context.Store  (physAddr, value); break;
             }
 
+            context.Branch(lblEnd);
+
+            context.MarkLabel(lblSlowPath, BasicBlockFrequency.Cold);
+
+            EmitWriteIntFallback(context, address, rt, size);
+
             context.MarkLabel(lblEnd);
         }
 
@@ -283,7 +274,7 @@ namespace ARMeilleure.Instructions
 
             Operand lblFastPath = Label();
 
-            context.BranchIfFalse(lblFastPath, isUnalignedAddr);
+            context.BranchIfFalse(lblFastPath, isUnalignedAddr, BasicBlockFrequency.Cold);
 
             // The call is not expected to return (it should throw).
             context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)), address);
@@ -318,21 +309,12 @@ namespace ARMeilleure.Instructions
             int elem,
             int size)
         {
-            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
-
-            Operand lblFastPath = Label();
             Operand lblSlowPath = Label();
             Operand lblEnd      = Label();
 
-            context.BranchIfFalse(lblFastPath, isUnalignedAddr);
+            Operand isUnalignedAddr = EmitAddressCheck(context, address, size);
 
-            context.MarkLabel(lblSlowPath);
-
-            EmitWriteVectorFallback(context, address, rt, elem, size);
-
-            context.Branch(lblEnd);
-
-            context.MarkLabel(lblFastPath);
+            context.BranchIfTrue(lblSlowPath, isUnalignedAddr);
 
             Operand physAddr = EmitPtPointerLoad(context, address, lblSlowPath, write: true);
 
@@ -340,12 +322,18 @@ namespace ARMeilleure.Instructions
 
             switch (size)
             {
-                case 0: context.Store8 (physAddr, context.VectorExtract8(value, elem));                  break;
-                case 1: context.Store16(physAddr, context.VectorExtract16(value, elem));                 break;
-                case 2: context.Store  (physAddr, context.VectorExtract(OperandType.FP32, value, elem)); break;
-                case 3: context.Store  (physAddr, context.VectorExtract(OperandType.FP64, value, elem)); break;
-                case 4: context.Store  (physAddr, value);                                                break;
+                case 0: context.Store8 (physAddr, context.VectorExtract8(value, elem));                 break;
+                case 1: context.Store16(physAddr, context.VectorExtract16(value, elem));                break;
+                case 2: context.Store  (physAddr, context.VectorExtract(OperandType.I32, value, elem)); break;
+                case 3: context.Store  (physAddr, context.VectorExtract(OperandType.I64, value, elem)); break;
+                case 4: context.Store  (physAddr, value);                                               break;
             }
+
+            context.Branch(lblEnd);
+
+            context.MarkLabel(lblSlowPath, BasicBlockFrequency.Cold);
+
+            EmitWriteVectorFallback(context, address, rt, elem, size);
 
             context.MarkLabel(lblEnd);
         }
@@ -403,35 +391,34 @@ namespace ARMeilleure.Instructions
 
             if (lblSlowPath != null)
             {
-                context.BranchIf(lblSlowPath, pte, Const(0L), Comparison.LessOrEqual);
+                ulong protection = (write ? 3UL : 1UL) << 48;
+                context.BranchIfTrue(lblSlowPath, context.BitwiseAnd(pte, Const(protection)));
             }
             else
             {
                 // When no label is provided to jump to a slow path if the address is invalid,
                 // we do the validation ourselves, and throw if needed.
-                if (write)
-                {
-                    Operand lblNotWatched = Label();
 
-                    // Is the page currently being monitored for modifications? If so we need to call MarkRegionAsModified.
-                    context.BranchIf(lblNotWatched, pte, Const(0L), Comparison.GreaterOrEqual);
+                Operand lblNotWatched = Label();
 
-                    // Mark the region as modified. Size here doesn't matter as address is assumed to be size aligned here.
-                    context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.MarkRegionAsModified)), address, Const(1UL));
-                    context.MarkLabel(lblNotWatched);
-                }
+                // Is the page currently being tracked for read/write? If so we need to call MarkRegionAsModified.
+                context.BranchIf(lblNotWatched, pte, Const(0L), Comparison.GreaterOrEqual, BasicBlockFrequency.Cold);
+
+                // Mark the region as modified. Size here doesn't matter as address is assumed to be size aligned here.
+                context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.SignalMemoryTracking)), address, Const(1UL), Const(write ? 1 : 0));
+                context.MarkLabel(lblNotWatched);
 
                 Operand lblNonNull = Label();
 
                 // Skip exception if the PTE address is non-null (not zero).
-                context.BranchIfTrue(lblNonNull, pte);
+                context.BranchIfTrue(lblNonNull, pte, BasicBlockFrequency.Cold);
 
                 // The call is not expected to return (it should throw).
                 context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)), address);
                 context.MarkLabel(lblNonNull);
-
-                pte = context.BitwiseAnd(pte, Const(0xffffffffffffUL));
             }
+
+            pte = context.BitwiseAnd(pte, Const(0xffffffffffffUL)); // Ignore any software protection bits. (they are still used by c# memory access)
 
             Operand pageOffset = context.BitwiseAnd(address, Const(address.Type, PageMask));
 

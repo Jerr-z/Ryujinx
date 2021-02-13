@@ -1,26 +1,23 @@
 using LibHac;
 using LibHac.Common;
 using LibHac.Fs;
-using LibHac.Fs.Shim;
+using LibHac.Fs.Fsa;
 using LibHac.FsSystem;
 using LibHac.FsSystem.NcaUtils;
-using LibHac.Ncm;
 using LibHac.Ns;
-using LibHac.Spl;
-using Ryujinx.Common.Logging;
 using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Logging;
 using Ryujinx.Configuration.System;
 using Ryujinx.HLE.FileSystem;
+using Ryujinx.HLE.HOS;
 using Ryujinx.HLE.Loaders.Npdm;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
-using RightsId = LibHac.Fs.RightsId;
 using JsonHelper = Ryujinx.Common.Utilities.JsonHelper;
 
 namespace Ryujinx.Ui
@@ -43,10 +40,12 @@ namespace Ryujinx.Ui
         public static IEnumerable<string> GetFilesInDirectory(string directory)
         {
             Stack<string> stack = new Stack<string>();
+
             stack.Push(directory);
+
             while (stack.Count > 0)
             {
-                string dir = stack.Pop();
+                string   dir     = stack.Pop();
                 string[] content = { };
 
                 try
@@ -61,7 +60,9 @@ namespace Ryujinx.Ui
                 if (content.Length > 0)
                 {
                     foreach (string file in content)
+                    {
                         yield return file;
+                    }
                 }
 
                 try
@@ -76,7 +77,9 @@ namespace Ryujinx.Ui
                 if (content.Length > 0)
                 {
                     foreach (string subdir in content)
+                    {
                         stack.Push(subdir);
+                    }
                 }
             }
         }
@@ -98,6 +101,7 @@ namespace Ryujinx.Ui
 
             // Builds the applications list with paths to found applications
             List<string> applications = new List<string>();
+
             foreach (string appDir in appDirs)
             {
                 
@@ -132,6 +136,7 @@ namespace Ryujinx.Ui
                 string developer       = "Unknown";
                 string version         = "0";
                 byte[] applicationIcon = null;
+
                 BlitStruct<ApplicationControlProperty> controlHolder = new BlitStruct<ApplicationControlProperty>(1);
 
                 try
@@ -211,9 +216,6 @@ namespace Ryujinx.Ui
                                     GetControlFsAndTitleId(pfs, out IFileSystem controlFs, out titleId);
 
                                     ReadControlData(controlFs, controlHolder.ByteSpan);
-
-                                    // Creates NACP class from the NACP file
-                                    controlFs.OpenFile(out IFile controlNacpFile, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
 
                                     // Get the title name, title ID, developer name and version number from the NACP
                                     version = IsUpdateApplied(titleId, out string updateVersion) ? updateVersion : controlHolder.Value.DisplayVersion.ToString();
@@ -455,23 +457,7 @@ namespace Ryujinx.Ui
 
         private static void GetControlFsAndTitleId(PartitionFileSystem pfs, out IFileSystem controlFs, out string titleId)
         {
-            Nca controlNca = null;
-
-            // Add keys to key set if needed
-            _virtualFileSystem.ImportTickets(pfs);
-
-            // Find the Control NCA and store it in variable called controlNca
-            foreach (DirectoryEntryEx fileEntry in pfs.EnumerateEntries("/", "*.nca"))
-            {
-                pfs.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-
-                Nca nca = new Nca(_virtualFileSystem.KeySet, ncaFile.AsStorage());
-
-                if (nca.Header.ContentType == NcaContentType.Control)
-                {
-                    controlNca = nca;
-                }
-            }
+            (_, _, Nca controlNca) = ApplicationLoader.GetGameData(_virtualFileSystem, pfs, 0);
 
             // Return the ControlFS
             controlFs = controlNca?.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.None);
@@ -480,7 +466,7 @@ namespace Ryujinx.Ui
 
         internal static ApplicationMetadata LoadAndSaveMetaData(string titleId, Action<ApplicationMetadata> modifyFunction = null)
         {
-            string metadataFolder = Path.Combine(_virtualFileSystem.GetBasePath(), "games", titleId, "gui");
+            string metadataFolder = Path.Combine(AppDataManager.GamesDirPath, titleId, "gui");
             string metadataFile   = Path.Combine(metadataFolder, "metadata.json");
 
             ApplicationMetadata appMetadata;
@@ -581,6 +567,7 @@ namespace Ryujinx.Ui
                     if (!((U8Span)controlTitle.Name).IsEmpty())
                     {
                         titleName = controlTitle.Name.ToString();
+
                         break;
                     }
                 }
@@ -593,6 +580,7 @@ namespace Ryujinx.Ui
                     if (!((U8Span)controlTitle.Publisher).IsEmpty())
                     {
                         publisher = controlTitle.Publisher.ToString();
+
                         break;
                     }
                 }
@@ -618,67 +606,33 @@ namespace Ryujinx.Ui
 
         private static bool IsUpdateApplied(string titleId, out string version)
         {
-            string jsonPath = Path.Combine(_virtualFileSystem.GetBasePath(), "games", titleId, "updates.json");
+            string updatePath = "(unknown)";
 
-            if (File.Exists(jsonPath))
+            try
             {
-                string updatePath = JsonHelper.DeserializeFromFile<TitleUpdateMetadata>(jsonPath).Selected;
+                (Nca patchNca, Nca controlNca) = ApplicationLoader.GetGameUpdateData(_virtualFileSystem, titleId, 0, out updatePath);
 
-                if (!File.Exists(updatePath))
+                if (patchNca != null && controlNca != null)
                 {
-                    version = "";
+                    ApplicationControlProperty controlData = new ApplicationControlProperty();
 
-                    return false;
+                    controlNca.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.None).OpenFile(out IFile nacpFile, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
+
+                    nacpFile.Read(out _, 0, SpanHelpers.AsByteSpan(ref controlData), ReadOption.None).ThrowIfFailure();
+
+                    version = controlData.DisplayVersion.ToString();
+
+                    return true;
                 }
-
-                using (FileStream file = new FileStream(updatePath, FileMode.Open, FileAccess.Read))
-                {
-                    PartitionFileSystem nsp = new PartitionFileSystem(file.AsStorage());
-
-                    _virtualFileSystem.ImportTickets(nsp);
-
-                    foreach (DirectoryEntryEx fileEntry in nsp.EnumerateEntries("/", "*.nca"))
-                    {
-                        nsp.OpenFile(out IFile ncaFile, fileEntry.FullPath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-
-                        try
-                        {
-                            Nca nca = new Nca(_virtualFileSystem.KeySet, ncaFile.AsStorage());
-
-                            if ($"{nca.Header.TitleId.ToString("x16")[..^3]}000" != titleId)
-                            {
-                                break;
-                            }
-
-                            if (nca.Header.ContentType == NcaContentType.Control)
-                            {
-                                ApplicationControlProperty controlData = new ApplicationControlProperty();
-
-                                nca.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.None).OpenFile(out IFile nacpFile, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
-
-                                nacpFile.Read(out _, 0, SpanHelpers.AsByteSpan(ref controlData), ReadOption.None).ThrowIfFailure();
-
-                                version = controlData.DisplayVersion.ToString();
-
-                                return true;
-                            }
-                        }
-                        catch (InvalidDataException)
-                        {
-                            Logger.Warning?.Print(LogClass.Application,
-                                $"The header key is incorrect or missing and therefore the NCA header content type check has failed. Errored File: {updatePath}");
-
-                            break;
-                        }
-                        catch (MissingKeyException exception)
-                        {
-                            Logger.Warning?.Print(LogClass.Application,
-                                $"Your key set is missing a key with the name: {exception.Name}. Errored File: {updatePath}");
-
-                            break;
-                        }
-                    }
-                }
+            }
+            catch (InvalidDataException)
+            {
+                Logger.Warning?.Print(LogClass.Application,
+                    $"The header key is incorrect or missing and therefore the NCA header content type check has failed. Errored File: {updatePath}");
+            }
+            catch (MissingKeyException exception)
+            {
+                Logger.Warning?.Print(LogClass.Application, $"Your key set is missing a key with the name: {exception.Name}. Errored File: {updatePath}");
             }
 
             version = "";

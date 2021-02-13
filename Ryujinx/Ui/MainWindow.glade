@@ -65,13 +65,23 @@
                       </object>
                     </child>
                     <child>
+                      <object class="GtkMenuItem" id="OpenLogsFolder">
+                        <property name="visible">True</property>
+                        <property name="can_focus">False</property>
+                        <property name="tooltip_text" translatable="yes">Opens the folder where logs are written to.</property>
+                        <property name="label" translatable="yes">Open Logs Folder</property>
+                        <property name="use_underline">True</property>
+                        <signal name="activate" handler="OpenLogsFolder_Pressed" swapped="no"/>
+                      </object>
+                    </child>
+                    <child>
                       <object class="GtkSeparatorMenuItem">
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                       </object>
                     </child>
                     <child>
-                      <object class="GtkMenuItem" id="Exit">
+                      <object class="GtkMenuItem" id="ExitMenuItem">
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                         <property name="tooltip_text" translatable="yes">Exit Ryujinx</property>
@@ -295,14 +305,6 @@
                         </child>
                       </object>
                     </child>
-                    <child>
-                      <object class="GtkMenuItem" id="_openDebugger">
-                        <property name="visible">True</property>
-                        <property name="can_focus">False</property>
-                        <property name="label" translatable="yes">Open Debugger</property>
-                        <property name="use_underline">True</property>
-                      </object>
-                    </child>
                   </object>
                 </child>
               </object>
@@ -318,10 +320,10 @@
                     <property name="visible">True</property>
                     <property name="can_focus">False</property>
                     <child>
-                      <object class="GtkMenuItem" id="CheckUpdates">
+                      <object class="GtkMenuItem" id="UpdateMenuItem">
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
-                        <property name="tooltip_text" translatable="yes">Check for updates to Ryujinx (requires Ryujinx Installer)</property>
+                        <property name="tooltip_text" translatable="yes">Check for updates to Ryujinx</property>
                         <property name="label" translatable="yes">Check for Updates</property>
                         <property name="use_underline">True</property>
                         <signal name="activate" handler="Update_Pressed" swapped="no"/>
@@ -519,7 +521,7 @@
                       </packing>
                     </child>
                     <child>
-                      <object class="GtkLabel" id="_hostStatus">
+                      <object class="GtkLabel" id="_gameStatus">
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                         <property name="halign">start</property>
@@ -544,7 +546,7 @@
                       </packing>
                     </child>
                     <child>
-                      <object class="GtkLabel" id="_gameStatus">
+                      <object class="GtkLabel" id="_fifoStatus">
                         <property name="visible">True</property>
                         <property name="can_focus">False</property>
                         <property name="halign">start</property>

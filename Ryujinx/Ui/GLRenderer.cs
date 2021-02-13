@@ -13,11 +13,17 @@ using Ryujinx.HLE.HOS.Services.Hid;
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using Ryujinx.Motion;
 
 namespace Ryujinx.Ui
 {
     public class GlRenderer : GLWidget
     {
+        static GlRenderer()
+        {
+            OpenTK.Graphics.GraphicsContext.ShareContexts = true;
+        }
+
         private const int SwitchPanelWidth  = 1280;
         private const int SwitchPanelHeight = 720;
         private const int TargetFps         = 60;
@@ -47,6 +53,8 @@ namespace Ryujinx.Ui
         private Renderer _renderer;
 
         private HotkeyButtons _prevHotkeyButtons;
+
+        private Client _dsuClient;
 
         private GraphicsDebugLevel _glLogLevel;
 
@@ -79,6 +87,8 @@ namespace Ryujinx.Ui
 
             this.Shown += Renderer_Shown;
 
+            _dsuClient = new Client();
+
             _glLogLevel = glLogLevel;
         }
 
@@ -90,6 +100,7 @@ namespace Ryujinx.Ui
         private void GLRenderer_ShuttingDown(object sender, EventArgs args)
         {
             _device.DisposeGpu();
+            _dsuClient?.Dispose();
         }
 
         private void Parent_FocusOutEvent(object o, Gtk.FocusOutEventArgs args)
@@ -104,6 +115,7 @@ namespace Ryujinx.Ui
 
         private void GLRenderer_Destroyed(object sender, EventArgs e)
         {
+            _dsuClient?.Dispose();
             Dispose();
         }
 
@@ -187,19 +199,6 @@ namespace Ryujinx.Ui
             Gtk.Application.Invoke(delegate
             {
                 parent.Present();
-
-                string titleNameSection = string.IsNullOrWhiteSpace(_device.Application.TitleName) ? string.Empty
-                    : $" - {_device.Application.TitleName}";
-
-                string titleVersionSection = string.IsNullOrWhiteSpace(_device.Application.DisplayVersion) ? string.Empty
-                    : $" v{_device.Application.DisplayVersion}";
-
-                string titleIdSection = string.IsNullOrWhiteSpace(_device.Application.TitleIdText) ? string.Empty
-                    : $" ({_device.Application.TitleIdText.ToUpper()})";
-
-                string titleArchSection = _device.Application.TitleIs64Bit ? " (64-bit)" : " (32-bit)";
-
-                parent.Title = $"Ryujinx {Program.Version}{titleNameSection}{titleVersionSection}{titleIdSection}{titleArchSection}";
             });
 
             Thread renderLoopThread = new Thread(Render)
@@ -287,6 +286,7 @@ namespace Ryujinx.Ui
 
         public void Exit()
         {
+            _dsuClient?.Dispose();
             if (IsStopped)
             {
                 return;
@@ -300,7 +300,7 @@ namespace Ryujinx.Ui
         {
             if (!(_device.Gpu.Renderer is Renderer))
             {
-                throw new NotSupportedException($"GPU renderer must be an OpenGL renderer when using GLRenderer!");
+                throw new NotSupportedException($"GPU renderer must be an OpenGL renderer when using {typeof(Renderer).Name}!");
             }
 
             _renderer = (Renderer)_device.Gpu.Renderer;
@@ -309,9 +309,12 @@ namespace Ryujinx.Ui
         public void Render()
         {
             // First take exclusivity on the OpenGL context.
+            _renderer.InitializeBackgroundContext(GraphicsContext);
+            Gtk.Window parent = Toplevel as Gtk.Window;
+            parent.Present();
             GraphicsContext.MakeCurrent(WindowInfo);
 
-            _renderer.Initialize(_glLogLevel);
+            _device.Gpu.Initialize(_glLogLevel);
 
             // Make sure the first frame is not transparent.
             GL.ClearColor(OpenTK.Color.Black);
@@ -331,7 +334,9 @@ namespace Ryujinx.Ui
 
                 if (_device.WaitFifo())
                 {
+                    _device.Statistics.RecordFifoStart();
                     _device.ProcessFrame();
+                    _device.Statistics.RecordFifoEnd();
                 }
 
                 string dockedMode = ConfigurationState.Instance.System.EnableDockedMode ? "Docked" : "Handheld";
@@ -345,13 +350,11 @@ namespace Ryujinx.Ui
                 {
                     _device.PresentFrame(SwapBuffers);
 
-                    _device.Statistics.RecordSystemFrameTime();
-
                     StatusUpdatedEvent?.Invoke(this, new StatusUpdatedEventArgs(
                         _device.EnableDeviceVsync,
                         dockedMode,
-                        $"Host: {_device.Statistics.GetSystemFrameRate():00.00} FPS",
                         $"Game: {_device.Statistics.GetGameFrameRate():00.00} FPS",
+                        $"FIFO: {_device.Statistics.GetFifoPercent():0.00} %",
                         $"GPU:  {_renderer.GpuVendor}"));
 
                     _ticks = Math.Min(_ticks - _ticksPerFrame, _ticksPerFrame);
@@ -406,7 +409,10 @@ namespace Ryujinx.Ui
             }
 
             List<GamepadInput> gamepadInputs = new List<GamepadInput>(NpadDevices.MaxControllers);
+            List<SixAxisInput> motionInputs  = new List<SixAxisInput>(NpadDevices.MaxControllers);
 
+            MotionDevice motionDevice = new MotionDevice(_dsuClient);
+            
             foreach (InputConfig inputConfig in ConfigurationState.Instance.Hid.InputConfig.Value)
             {
                 ControllerKeys   currentButton = 0;
@@ -418,6 +424,11 @@ namespace Ryujinx.Ui
                 int leftJoystickDy  = 0;
                 int rightJoystickDx = 0;
                 int rightJoystickDy = 0;
+
+                if (inputConfig.EnableMotion)
+                {
+                    motionDevice.RegisterController(inputConfig.PlayerIndex);
+                }
 
                 if (inputConfig is KeyboardConfig keyboardConfig)
                 {
@@ -488,6 +499,19 @@ namespace Ryujinx.Ui
 
                 currentButton |= _device.Hid.UpdateStickButtons(leftJoystick, rightJoystick);
 
+                motionDevice.Poll(inputConfig, inputConfig.Slot);
+
+                SixAxisInput sixAxisInput = new SixAxisInput()
+                {
+                    PlayerId      = (HLE.HOS.Services.Hid.PlayerIndex)inputConfig.PlayerIndex,
+                    Accelerometer = motionDevice.Accelerometer,
+                    Gyroscope     = motionDevice.Gyroscope,
+                    Rotation      = motionDevice.Rotation,
+                    Orientation   = motionDevice.Orientation
+                };
+
+                motionInputs.Add(sixAxisInput);
+
                 gamepadInputs.Add(new GamepadInput
                 {
                     PlayerId = (HLE.HOS.Services.Hid.PlayerIndex)inputConfig.PlayerIndex,
@@ -495,9 +519,29 @@ namespace Ryujinx.Ui
                     LStick   = leftJoystick,
                     RStick   = rightJoystick
                 });
-            }
 
+                if (inputConfig.ControllerType == Common.Configuration.Hid.ControllerType.JoyconPair)
+                {
+                    if (!inputConfig.MirrorInput)
+                    {
+                        motionDevice.Poll(inputConfig, inputConfig.AltSlot);
+
+                        sixAxisInput = new SixAxisInput()
+                        {
+                            PlayerId      = (HLE.HOS.Services.Hid.PlayerIndex)inputConfig.PlayerIndex,
+                            Accelerometer = motionDevice.Accelerometer,
+                            Gyroscope     = motionDevice.Gyroscope,
+                            Rotation      = motionDevice.Rotation,
+                            Orientation   = motionDevice.Orientation
+                        };
+                    }
+
+                    motionInputs.Add(sixAxisInput);
+                }
+            }
+            
             _device.Hid.Npads.Update(gamepadInputs);
+            _device.Hid.Npads.UpdateSixAxis(motionInputs);
 
             if(IsFocused)
             {

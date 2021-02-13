@@ -10,7 +10,9 @@ namespace Ryujinx.Graphics.GAL
 
         IWindow Window { get; }
 
-        IShader CompileShader(ShaderProgram shader);
+        void BackgroundContextAction(Action action);
+
+        IShader CompileShader(ShaderStage stage, string code);
 
         BufferHandle CreateBuffer(int size);
 
@@ -25,9 +27,13 @@ namespace Ryujinx.Graphics.GAL
 
         Capabilities GetCapabilities();
 
+        IProgram LoadProgramBinary(byte[] programBinary);
+
         void SetBufferData(BufferHandle buffer, int offset, ReadOnlySpan<byte> data);
 
         void UpdateCounters();
+
+        void PreFrame();
 
         ICounterEvent ReportCounter(CounterType type, EventHandler<ulong> resultHandler);
 

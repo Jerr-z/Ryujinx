@@ -298,13 +298,19 @@ namespace Ryujinx.Configuration
             /// </summary>
             public ReactiveObject<bool> EnableVsync { get; private set; }
 
+            /// <summary>
+            /// Enables or disables Shader cache
+            /// </summary>
+            public ReactiveObject<bool> EnableShaderCache { get; private set; }
+
             public GraphicsSection()
             {
-                ResScale        = new ReactiveObject<int>();
-                ResScaleCustom  = new ReactiveObject<float>();
-                MaxAnisotropy   = new ReactiveObject<float>();
-                ShadersDumpPath = new ReactiveObject<string>();
-                EnableVsync     = new ReactiveObject<bool>();
+                ResScale          = new ReactiveObject<int>();
+                ResScaleCustom    = new ReactiveObject<float>();
+                MaxAnisotropy     = new ReactiveObject<float>();
+                ShadersDumpPath   = new ReactiveObject<string>();
+                EnableVsync       = new ReactiveObject<bool>();
+                EnableShaderCache = new ReactiveObject<bool>();
             }
         }
 
@@ -343,6 +349,11 @@ namespace Ryujinx.Configuration
         /// </summary>
         public ReactiveObject<bool> EnableDiscordIntegration { get; private set; }
 
+        /// <summary>
+        /// Checks for updates when Ryujinx starts when enabled
+        /// </summary>
+        public ReactiveObject<bool> CheckUpdatesOnStart { get; private set; }
+
         private ConfigurationState()
         {
             Ui                       = new UiSection();
@@ -351,6 +362,7 @@ namespace Ryujinx.Configuration
             Graphics                 = new GraphicsSection();
             Hid                      = new HidSection();
             EnableDiscordIntegration = new ReactiveObject<bool>();
+            CheckUpdatesOnStart      = new ReactiveObject<bool>();
         }
 
         public ConfigurationFileFormat ToFileFormat()
@@ -393,7 +405,9 @@ namespace Ryujinx.Configuration
                 SystemTimeOffset          = System.SystemTimeOffset,
                 DockedMode                = System.EnableDockedMode,
                 EnableDiscordIntegration  = EnableDiscordIntegration,
+                CheckUpdatesOnStart       = CheckUpdatesOnStart,
                 EnableVsync               = Graphics.EnableVsync,
+                EnableShaderCache         = Graphics.EnableShaderCache,
                 EnableMulticoreScheduling = System.EnableMulticoreScheduling,
                 EnablePtc                 = System.EnablePtc,
                 EnableFsIntegrityChecks   = System.EnableFsIntegrityChecks,
@@ -452,7 +466,9 @@ namespace Ryujinx.Configuration
             System.SystemTimeOffset.Value          = 0;
             System.EnableDockedMode.Value          = false;
             EnableDiscordIntegration.Value         = true;
+            CheckUpdatesOnStart.Value              = true;
             Graphics.EnableVsync.Value             = true;
+            Graphics.EnableShaderCache.Value       = true;
             System.EnableMulticoreScheduling.Value = true;
             System.EnablePtc.Value                 = false;
             System.EnableFsIntegrityChecks.Value   = true;
@@ -475,12 +491,10 @@ namespace Ryujinx.Configuration
             Ui.EnableCustomTheme.Value             = false;
             Ui.CustomThemePath.Value               = "";
             Hid.EnableKeyboard.Value               = false;
-            
             Hid.Hotkeys.Value = new KeyboardHotkeys
             {
                 ToggleVsync = Key.Tab
             };
-
             Hid.InputConfig.Value = new List<InputConfig>
             {
                 new KeyboardConfig
@@ -521,7 +535,15 @@ namespace Ryujinx.Configuration
                         ButtonZr    = Key.O,
                         ButtonSl    = Key.PageUp,
                         ButtonSr    = Key.PageDown
-                    }
+                    },
+                    EnableMotion  = false,
+                    MirrorInput   = false,
+                    Slot          = 0,
+                    AltSlot       = 0,
+                    Sensitivity   = 100,
+                    GyroDeadzone  = 1,
+                    DsuServerHost = "127.0.0.1",
+                    DsuServerPort = 26760
                 }
             };
         }
@@ -620,7 +642,15 @@ namespace Ryujinx.Configuration
                             ButtonZr    = Key.O,
                             ButtonSl    = Key.Unbound,
                             ButtonSr    = Key.Unbound
-                        }
+                        },
+                        EnableMotion  = false,
+                        MirrorInput   = false,
+                        Slot          = 0,
+                        AltSlot       = 0,
+                        Sensitivity   = 100,
+                        GyroDeadzone  = 1,
+                        DsuServerHost = "127.0.0.1",
+                        DsuServerPort = 26760
                     }
                 };
 
@@ -696,6 +726,24 @@ namespace Ryujinx.Configuration
                 configurationFileUpdated = true;
             }
 
+            if (configurationFileFormat.Version < 14)
+            {
+                Common.Logging.Logger.Warning?.Print(LogClass.Application, $"Outdated configuration version {configurationFileFormat.Version}, migrating to version 14.");
+
+                configurationFileFormat.CheckUpdatesOnStart = true;
+
+                configurationFileUpdated = true;
+            }
+
+            if (configurationFileFormat.Version < 16)
+            {
+                Common.Logging.Logger.Warning?.Print(LogClass.Application, $"Outdated configuration version {configurationFileFormat.Version}, migrating to version 16.");
+
+                configurationFileFormat.EnableShaderCache = true;
+
+                configurationFileUpdated = true;
+            }
+
             List<InputConfig> inputConfig = new List<InputConfig>();
             inputConfig.AddRange(configurationFileFormat.ControllerConfig);
             inputConfig.AddRange(configurationFileFormat.KeyboardConfig);
@@ -720,7 +768,9 @@ namespace Ryujinx.Configuration
             System.SystemTimeOffset.Value          = configurationFileFormat.SystemTimeOffset;
             System.EnableDockedMode.Value          = configurationFileFormat.DockedMode;
             EnableDiscordIntegration.Value         = configurationFileFormat.EnableDiscordIntegration;
+            CheckUpdatesOnStart.Value              = configurationFileFormat.CheckUpdatesOnStart;
             Graphics.EnableVsync.Value             = configurationFileFormat.EnableVsync;
+            Graphics.EnableShaderCache.Value       = configurationFileFormat.EnableShaderCache;
             System.EnableMulticoreScheduling.Value = configurationFileFormat.EnableMulticoreScheduling;
             System.EnablePtc.Value                 = configurationFileFormat.EnablePtc;
             System.EnableFsIntegrityChecks.Value   = configurationFileFormat.EnableFsIntegrityChecks;
@@ -750,7 +800,7 @@ namespace Ryujinx.Configuration
             {
                 ToFileFormat().SaveConfig(configurationFilePath);
 
-                Common.Logging.Logger.Warning?.Print(LogClass.Application, "Configuration file has been updated!");
+                Common.Logging.Logger.Notice.Print(LogClass.Application, $"Configuration file updated to version {ConfigurationFileFormat.CurrentVersion}");
             }
         }
 
