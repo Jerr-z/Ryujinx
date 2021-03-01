@@ -10,6 +10,8 @@ namespace Ryujinx.Graphics.OpenGL
 {
     class Pipeline : IPipeline, IDisposable
     {
+        internal ulong DrawCount { get; private set; }
+
         private Program _program;
 
         private bool _rasterizerDiscard;
@@ -41,7 +43,7 @@ namespace Ryujinx.Graphics.OpenGL
 
         private readonly uint[] _componentMasks;
 
-        private bool _scissor0Enable = false;
+        private uint _scissorEnables;
 
         private bool _tfEnabled;
         private TransformFeedbackPrimitiveType _tfTopology;
@@ -89,6 +91,11 @@ namespace Ryujinx.Graphics.OpenGL
             _tfEnabled = true;
         }
 
+        public void ClearBuffer(BufferHandle destination, int offset, int size, uint value)
+        {
+            Buffer.Clear(destination, offset, size, value);
+        }
+
         public void ClearRenderTargetColor(int index, uint componentMask, ColorF color)
         {
             GL.ColorMask(
@@ -100,7 +107,7 @@ namespace Ryujinx.Graphics.OpenGL
 
             float[] colors = new float[] { color.Red, color.Green, color.Blue, color.Alpha };
 
-            GL.ClearBuffer(ClearBuffer.Color, index, colors);
+            GL.ClearBuffer(OpenTK.Graphics.OpenGL.ClearBuffer.Color, index, colors);
 
             RestoreComponentMask(index);
 
@@ -131,11 +138,11 @@ namespace Ryujinx.Graphics.OpenGL
             }
             else if (depthMask)
             {
-                GL.ClearBuffer(ClearBuffer.Depth, 0, ref depthValue);
+                GL.ClearBuffer(OpenTK.Graphics.OpenGL.ClearBuffer.Depth, 0, ref depthValue);
             }
             else if (stencilMask != 0)
             {
-                GL.ClearBuffer(ClearBuffer.Stencil, 0, ref stencilValue);
+                GL.ClearBuffer(OpenTK.Graphics.OpenGL.ClearBuffer.Stencil, 0, ref stencilValue);
             }
 
             if (stencilMaskChanged)
@@ -876,25 +883,27 @@ namespace Ryujinx.Graphics.OpenGL
             ((Sampler)sampler).Bind(binding);
         }
 
-        public void SetScissorEnable(int index, bool enable)
+        public void SetScissor(int index, bool enable, int x, int y, int width, int height)
         {
-            if (enable)
+            uint mask = 1u << index;
+
+            if (!enable)
             {
+                if ((_scissorEnables & mask) != 0)
+                {
+                    _scissorEnables &= ~mask;
+                    GL.Disable(IndexedEnableCap.ScissorTest, index);
+                }
+
+                return;
+            }
+
+            if ((_scissorEnables & mask) == 0)
+            {
+                _scissorEnables |= mask;
                 GL.Enable(IndexedEnableCap.ScissorTest, index);
             }
-            else
-            {
-                GL.Disable(IndexedEnableCap.ScissorTest, index);
-            }
 
-            if (index == 0)
-            {
-                _scissor0Enable = enable;
-            }
-        }
-
-        public void SetScissor(int index, int x, int y, int width, int height)
-        {
             GL.ScissorIndexed(index, x, y, width, height);
         }
 
@@ -1196,6 +1205,8 @@ namespace Ryujinx.Graphics.OpenGL
 
         private void PreDraw()
         {
+            DrawCount++;
+
             _vertexArray.Validate();
 
             if (_unit0Texture != null)
@@ -1232,7 +1243,7 @@ namespace Ryujinx.Graphics.OpenGL
 
         public void RestoreScissor0Enable()
         {
-            if (_scissor0Enable)
+            if ((_scissorEnables & 1u) != 0)
             {
                 GL.Enable(IndexedEnableCap.ScissorTest, 0);
             }

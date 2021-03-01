@@ -2,9 +2,11 @@ using LibHac;
 using LibHac.Bcat;
 using LibHac.Fs;
 using LibHac.FsSystem;
-using Ryujinx.Audio.Renderer;
+using Ryujinx.Audio;
+using Ryujinx.Audio.Input;
+using Ryujinx.Audio.Integration;
+using Ryujinx.Audio.Output;
 using Ryujinx.Audio.Renderer.Device;
-using Ryujinx.Audio.Renderer.Integration;
 using Ryujinx.Audio.Renderer.Server;
 using Ryujinx.Common;
 using Ryujinx.Configuration;
@@ -14,6 +16,7 @@ using Ryujinx.HLE.HOS.Kernel;
 using Ryujinx.HLE.HOS.Kernel.Memory;
 using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.HLE.HOS.Kernel.Threading;
+using Ryujinx.HLE.HOS.Services;
 using Ryujinx.HLE.HOS.Services.Am.AppletAE.AllSystemAppletProxiesService.SystemAppletProxy;
 using Ryujinx.HLE.HOS.Services.Apm;
 using Ryujinx.HLE.HOS.Services.Arp;
@@ -31,6 +34,7 @@ using Ryujinx.HLE.Loaders.Executables;
 using Ryujinx.HLE.Utilities;
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 
 namespace Ryujinx.HLE.HOS
@@ -49,6 +53,9 @@ namespace Ryujinx.HLE.HOS
         internal Switch Device { get; private set; }
 
         internal SurfaceFlinger SurfaceFlinger { get; private set; }
+        internal AudioManager AudioManager { get; private set; }
+        internal AudioOutputManager AudioOutputManager { get; private set; }
+        internal AudioInputManager AudioInputManager { get; private set; }
         internal AudioRendererManager AudioRendererManager { get; private set; }
         internal VirtualDeviceSessionRegistry AudioDeviceSessionRegistry { get; private set; }
 
@@ -57,6 +64,16 @@ namespace Ryujinx.HLE.HOS
         internal PerformanceState PerformanceState { get; private set; }
 
         internal AppletStateMgr AppletState { get; private set; }
+
+        internal ServerBase BsdServer { get; private set; }
+        internal ServerBase AudRenServer { get; private set; }
+        internal ServerBase AudOutServer { get; private set; }
+        internal ServerBase HidServer { get; private set; }
+        internal ServerBase NvDrvServer { get; private set; }
+        internal ServerBase TimeServer { get; private set; }
+        internal ServerBase ViServer { get; private set; }
+        internal ServerBase ViServerM { get; private set; }
+        internal ServerBase ViServerS { get; private set; }
 
         internal KSharedMemory HidSharedMem  { get; private set; }
         internal KSharedMemory FontSharedMem { get; private set; }
@@ -71,9 +88,6 @@ namespace Ryujinx.HLE.HOS
 
         public Keyset KeySet => Device.FileSystem.KeySet;
 
-#pragma warning disable CS0649
-        private bool _hasStarted;
-#pragma warning restore CS0649
         private bool _isDisposed;
 
         public bool EnablePtc { get; set; }
@@ -120,11 +134,11 @@ namespace Ryujinx.HLE.HOS
             iirsPageList.AddRange(iirsPa, IirsSize / KMemoryManager.PageSize);
             timePageList.AddRange(timePa, TimeSize / KMemoryManager.PageSize);
 
-            HidSharedMem  = new KSharedMemory(KernelContext, hidPageList,  0, 0, MemoryPermission.Read);
-            FontSharedMem = new KSharedMemory(KernelContext, fontPageList, 0, 0, MemoryPermission.Read);
-            IirsSharedMem = new KSharedMemory(KernelContext, iirsPageList, 0, 0, MemoryPermission.Read);
+            HidSharedMem  = new KSharedMemory(KernelContext, hidPageList,  0, 0, KMemoryPermission.Read);
+            FontSharedMem = new KSharedMemory(KernelContext, fontPageList, 0, 0, KMemoryPermission.Read);
+            IirsSharedMem = new KSharedMemory(KernelContext, iirsPageList, 0, 0, KMemoryPermission.Read);
 
-            KSharedMemory timeSharedMemory = new KSharedMemory(KernelContext, timePageList, 0, 0, MemoryPermission.Read);
+            KSharedMemory timeSharedMemory = new KSharedMemory(KernelContext, timePageList, 0, 0, KMemoryPermission.Read);
 
             TimeServiceManager.Instance.Initialize(device, this, timeSharedMemory, timePa - DramMemoryMap.DramBase, TimeSize);
 
@@ -133,8 +147,6 @@ namespace Ryujinx.HLE.HOS
             AppletState.SetFocus(true);
 
             Font = new SharedFontManager(device, fontPa - DramMemoryMap.DramBase);
-
-            IUserInterface.InitializePort(this);
 
             VsyncEvent = new KEvent(KernelContext);
 
@@ -199,29 +211,68 @@ namespace Ryujinx.HLE.HOS
 
         private void InitializeAudioRenderer()
         {
+            AudioManager = new AudioManager();
+            AudioOutputManager = new AudioOutputManager();
+            AudioInputManager = new AudioInputManager();
             AudioRendererManager = new AudioRendererManager();
             AudioDeviceSessionRegistry = new VirtualDeviceSessionRegistry();
 
-            IWritableEvent[] writableEvents = new IWritableEvent[RendererConstants.AudioRendererSessionCountMax];
+            IWritableEvent[] audioOutputRegisterBufferEvents = new IWritableEvent[Constants.AudioOutSessionCountMax];
 
-            for (int i = 0; i < writableEvents.Length; i++)
+            for (int i = 0; i < audioOutputRegisterBufferEvents.Length; i++)
+            {
+                KEvent registerBufferEvent = new KEvent(KernelContext);
+
+                audioOutputRegisterBufferEvents[i] = new AudioKernelEvent(registerBufferEvent);
+            }
+
+            AudioOutputManager.Initialize(Device.AudioDeviceDriver, audioOutputRegisterBufferEvents);
+
+            IWritableEvent[] audioInputRegisterBufferEvents = new IWritableEvent[Constants.AudioInSessionCountMax];
+
+            for (int i = 0; i < audioInputRegisterBufferEvents.Length; i++)
+            {
+                KEvent registerBufferEvent = new KEvent(KernelContext);
+
+                audioInputRegisterBufferEvents[i] = new AudioKernelEvent(registerBufferEvent);
+            }
+
+            AudioInputManager.Initialize(Device.AudioDeviceDriver, audioInputRegisterBufferEvents);
+
+            IWritableEvent[] systemEvents = new IWritableEvent[Constants.AudioRendererSessionCountMax];
+
+            for (int i = 0; i < systemEvents.Length; i++)
             {
                 KEvent systemEvent = new KEvent(KernelContext);
 
-                writableEvents[i] = new AudioKernelEvent(systemEvent);
+                systemEvents[i] = new AudioKernelEvent(systemEvent);
             }
 
-            HardwareDevice[] devices = new HardwareDevice[RendererConstants.AudioRendererSessionCountMax];
+            AudioManager.Initialize(Device.AudioDeviceDriver.GetUpdateRequiredEvent(), AudioOutputManager.Update, AudioInputManager.Update);
 
-            // TODO: don't hardcode those values.
-            // TODO: keep the device somewhere and dispose it when exiting.
-            // TODO: This is kind of wrong, we should have an high level API for that and mix all buffers between them.
-            for (int i = 0; i < devices.Length; i++)
-            {
-                devices[i] = new AalHardwareDevice(i, Device.AudioOut, 2, RendererConstants.TargetSampleRate);
-            }
+            AudioRendererManager.Initialize(systemEvents, Device.AudioDeviceDriver);
 
-            AudioRendererManager.Initialize(writableEvents, devices);
+            AudioManager.Start();
+        }
+
+        public void InitializeServices()
+        {
+            IUserInterface sm = new IUserInterface(KernelContext);
+
+            // Wait until SM server thread is done with initialization,
+            // only then doing connections to SM is safe.
+            sm.Server.InitDone.WaitOne();
+            sm.Server.InitDone.Dispose();
+
+            BsdServer = new ServerBase(KernelContext, "BsdServer");
+            AudRenServer = new ServerBase(KernelContext, "AudioRendererServer");
+            AudOutServer = new ServerBase(KernelContext, "AudioOutServer");
+            HidServer = new ServerBase(KernelContext, "HidServer");
+            NvDrvServer = new ServerBase(KernelContext, "NvservicesServer");
+            TimeServer = new ServerBase(KernelContext, "TimeServer");
+            ViServer = new ServerBase(KernelContext, "ViServerU");
+            ViServerM = new ServerBase(KernelContext, "ViServerM");
+            ViServerS = new ServerBase(KernelContext, "ViServerS");
         }
 
         public void LoadKip(string kipPath)
@@ -252,13 +303,21 @@ namespace Ryujinx.HLE.HOS
                 State.DockedMode = e.NewValue;
                 PerformanceState.PerformanceMode = State.DockedMode ? PerformanceMode.Boost : PerformanceMode.Default;
 
-                AppletState.EnqueueMessage(MessageInfo.OperationModeChanged);
-                AppletState.EnqueueMessage(MessageInfo.PerformanceModeChanged);
+                AppletState.Messages.Enqueue(MessageInfo.OperationModeChanged);
+                AppletState.Messages.Enqueue(MessageInfo.PerformanceModeChanged);
+                AppletState.MessageEvent.ReadableEvent.Signal();
+
                 SignalDisplayResolutionChange();
 
                 // Reconfigure controllers
                 Device.Hid.RefreshInputConfig(ConfigurationState.Instance.Hid.InputConfig.Value);
             }
+        }
+
+        public void SimulateWakeUpMessage()
+        {
+            AppletState.Messages.Enqueue(MessageInfo.Resume);
+            AppletState.MessageEvent.ReadableEvent.Signal();
         }
 
         public void SignalDisplayResolutionChange()
@@ -269,22 +328,6 @@ namespace Ryujinx.HLE.HOS
         public void SignalVsync()
         {
             VsyncEvent.ReadableEvent.Signal();
-        }
-
-        public void EnableMultiCoreScheduling()
-        {
-            if (!_hasStarted)
-            {
-                KernelContext.Scheduler.MultiCoreScheduling = true;
-            }
-        }
-
-        public void DisableMultiCoreScheduling()
-        {
-            if (!_hasStarted)
-            {
-                KernelContext.Scheduler.MultiCoreScheduling = false;
-            }
         }
 
         public void Dispose()
@@ -300,8 +343,6 @@ namespace Ryujinx.HLE.HOS
 
                 _isDisposed = true;
 
-                SurfaceFlinger.Dispose();
-
                 KProcess terminationProcess = new KProcess(KernelContext);
                 KThread terminationThread = new KThread(KernelContext);
 
@@ -310,16 +351,25 @@ namespace Ryujinx.HLE.HOS
                     // Force all threads to exit.
                     lock (KernelContext.Processes)
                     {
-                        foreach (KProcess process in KernelContext.Processes.Values)
+                        // Terminate application.
+                        foreach (KProcess process in KernelContext.Processes.Values.Where(x => x.Flags.HasFlag(ProcessCreationFlags.IsApplication)))
+                        {
+                            process.Terminate();
+                        }
+
+                        // The application existed, now surface flinger can exit too.
+                        SurfaceFlinger.Dispose();
+
+                        // Terminate HLE services (must be done after the application is already terminated,
+                        // otherwise the application will receive errors due to service termination.
+                        foreach (KProcess process in KernelContext.Processes.Values.Where(x => !x.Flags.HasFlag(ProcessCreationFlags.IsApplication)))
                         {
                             process.Terminate();
                         }
                     }
 
                     // Exit ourself now!
-                    KernelContext.Scheduler.ExitThread(terminationThread);
-                    KernelContext.Scheduler.GetCurrentThread().Exit();
-                    KernelContext.Scheduler.RemoveThread(terminationThread);
+                    KernelStatic.GetCurrentThread().Exit();
                 });
 
                 terminationThread.Start();
@@ -336,6 +386,10 @@ namespace Ryujinx.HLE.HOS
                 // Destroy nvservices channels as KThread could be waiting on some user events.
                 // This is safe as KThread that are likely to call ioctls are going to be terminated by the post handler hook on the SVC facade.
                 INvDrvServices.Destroy();
+
+                AudioManager.Dispose();
+                AudioOutputManager.Dispose();
+                AudioInputManager.Dispose();
 
                 AudioRendererManager.Dispose();
 

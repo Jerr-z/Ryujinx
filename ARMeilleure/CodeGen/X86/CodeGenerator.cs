@@ -190,6 +190,11 @@ namespace ARMeilleure.CodeGen.X86
 
                 byte[] code = context.GetCode();
 
+                if (ptcInfo != null)
+                {
+                    ptcInfo.Code = code;
+                }
+
                 Logger.EndPass(PassName.CodeGeneration);
 
                 return new CompiledFunction(code, unwindInfo);
@@ -246,6 +251,40 @@ namespace ARMeilleure.CodeGen.X86
                         }
 
                         context.Assembler.Movzx8(dest, dest, OperandType.I32);
+
+                        break;
+                    }
+
+                    case IntrinsicType.Mxcsr:
+                    {
+                        Operand offset = operation.GetSource(0);
+                        Operand bits   = operation.GetSource(1);
+
+                        Debug.Assert(offset.Kind == OperandKind.Constant && bits.Kind == OperandKind.Constant);
+                        Debug.Assert(offset.Type == OperandType.I32 && bits.Type == OperandType.I32);
+
+                        int offs = offset.AsInt32() + context.CallArgsRegionSize;
+
+                        Operand rsp = Register(X86Register.Rsp);
+
+                        MemoryOperand memOp = MemoryOp(OperandType.I32, rsp, null, Multiplier.x1, offs);
+
+                        Debug.Assert(HardwareCapabilities.SupportsSse || HardwareCapabilities.SupportsVexEncoding);
+
+                        context.Assembler.Stmxcsr(memOp);
+
+                        if (intrinOp.Intrinsic == Intrinsic.X86Mxcsrmb)
+                        {
+                            context.Assembler.Or(memOp, bits, OperandType.I32);
+                        }
+                        else /* if (intrinOp.Intrinsic == Intrinsic.X86Mxcsrub) */
+                        {
+                            Operand notBits = Const(~bits.AsInt32());
+
+                            context.Assembler.And(memOp, notBits, OperandType.I32);
+                        }
+
+                        context.Assembler.Ldmxcsr(memOp);
 
                         break;
                     }
@@ -435,6 +474,28 @@ namespace ARMeilleure.CodeGen.X86
 
                         break;
                     }
+
+                    case IntrinsicType.Fma:
+                    {
+                        Operand dest = operation.Destination;
+                        Operand src1 = operation.GetSource(0);
+                        Operand src2 = operation.GetSource(1);
+                        Operand src3 = operation.GetSource(2);
+
+                        Debug.Assert(HardwareCapabilities.SupportsVexEncoding);
+
+                        Debug.Assert(dest.Kind == OperandKind.Register && src1.Kind == OperandKind.Register && src2.Kind == OperandKind.Register);
+                        Debug.Assert(src3.Kind == OperandKind.Register || src3.Kind == OperandKind.Memory);
+
+                        EnsureSameType(dest, src1, src2, src3);
+                        Debug.Assert(dest.Type == OperandType.V128);
+
+                        Debug.Assert(dest.Value == src1.Value);
+
+                        context.Assembler.WriteInstruction(info.Inst, dest, src2, src3);
+
+                        break;
+                    }
                 }
             }
             else
@@ -458,19 +519,50 @@ namespace ARMeilleure.CodeGen.X86
             Operand src1 = operation.GetSource(0);
             Operand src2 = operation.GetSource(1);
 
-            ValidateBinOp(dest, src1, src2);
-
             if (dest.Type.IsInteger())
             {
-                context.Assembler.Add(dest, src2, dest.Type);
+                // If Destination and Source 1 Operands are the same, perform a standard add as there are no benefits to using LEA.
+                if (dest.Kind == src1.Kind && dest.Value == src1.Value)
+                {
+                    ValidateBinOp(dest, src1, src2);
+
+                    context.Assembler.Add(dest, src2, dest.Type);
+                }
+                else
+                {
+                    EnsureSameType(dest, src1, src2);
+
+                    int offset;
+                    Operand index;
+
+                    if (src2.Kind == OperandKind.Constant)
+                    {
+                        offset = src2.AsInt32();
+                        index = null;
+                    }
+                    else
+                    {
+                        offset = 0;
+                        index = src2;
+                    }
+
+                    MemoryOperand memOp = MemoryOp(dest.Type, src1, index, Multiplier.x1, offset);
+
+                    context.Assembler.Lea(dest, memOp, dest.Type);
+                }
             }
-            else if (dest.Type == OperandType.FP32)
+            else 
             {
-                context.Assembler.Addss(dest, src1, src2);
-            }
-            else /* if (dest.Type == OperandType.FP64) */
-            {
-                context.Assembler.Addsd(dest, src1, src2);
+                ValidateBinOp(dest, src1, src2);
+
+                if (dest.Type == OperandType.FP32)
+                {
+                    context.Assembler.Addss(dest, src1, src2);
+                }
+                else /* if (dest.Type == OperandType.FP64) */
+                {
+                    context.Assembler.Addsd(dest, src1, src2);
+                }
             }
         }
 

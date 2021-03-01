@@ -19,19 +19,8 @@ namespace ARMeilleure.Instructions
 
                 if (size == 4)
                 {
-                    Operand isUnalignedAddr = InstEmitMemoryHelper.EmitAddressCheck(context, address, size);
-
-                    Operand lblFastPath = Label();
-
-                    context.BranchIfFalse(lblFastPath, isUnalignedAddr);
-
-                    // The call is not expected to return (it should throw).
-                    context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)), address);
-
-                    context.MarkLabel(lblFastPath);
-
                     // Only 128-bit CAS is guaranteed to have a atomic load.
-                    Operand physAddr = InstEmitMemoryHelper.EmitPtPointerLoad(context, address, null, write: false);
+                    Operand physAddr = InstEmitMemoryHelper.EmitPtPointerLoad(context, address, null, write: false, 4);
 
                     Operand zero = context.VectorZero();
 
@@ -48,6 +37,18 @@ namespace ARMeilleure.Instructions
                 Operand exValuePtr = context.Add(arg0, Const((long)NativeContext.GetExclusiveValueOffset()));
 
                 context.Store(exAddrPtr, context.BitwiseAnd(address, Const(address.Type, GetExclusiveAddressMask())));
+
+                // Make sure the unused higher bits of the value are cleared.
+                if (size < 3)
+                {
+                    context.Store(exValuePtr, Const(0UL));
+                }
+                if (size < 4)
+                {
+                    context.Store(context.Add(exValuePtr, Const(exValuePtr.Type, 8L)), Const(0UL));
+                }
+
+                // Store the new exclusive value.
                 context.Store(exValuePtr, value);
 
                 return value;
@@ -74,6 +75,11 @@ namespace ARMeilleure.Instructions
 
             if (exclusive)
             {
+                // We overwrite one of the register (Rs),
+                // keep a copy of the values to ensure we are working with the correct values.
+                address = context.Copy(address);
+                value = context.Copy(value);
+
                 void SetRs(Operand value)
                 {
                     if (a32)
@@ -98,24 +104,12 @@ namespace ARMeilleure.Instructions
 
                 Operand lblExit = Label();
 
-                SetRs(exFailed);
+                SetRs(Const(1));
 
                 context.BranchIfTrue(lblExit, exFailed);
 
-                // STEP 2: We have exclusive access, make sure that the address is valid.
-                Operand isUnalignedAddr = InstEmitMemoryHelper.EmitAddressCheck(context, address, size);
-
-                Operand lblFastPath = Label();
-
-                context.BranchIfFalse(lblFastPath, isUnalignedAddr);
-
-                // The call is not expected to return (it should throw).
-                context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.ThrowInvalidMemoryAccess)), address);
-
-                // STEP 3: We have exclusive access and the address is valid, attempt the store using CAS.
-                context.MarkLabel(lblFastPath);
-
-                Operand physAddr = InstEmitMemoryHelper.EmitPtPointerLoad(context, address, null, write: true);
+                // STEP 2: We have exclusive access and the address is valid, attempt the store using CAS.
+                Operand physAddr = InstEmitMemoryHelper.EmitPtPointerLoad(context, address, null, write: true, size);
 
                 Operand exValuePtr = context.Add(arg0, Const((long)NativeContext.GetExclusiveValueOffset()));
                 Operand exValue = size switch
@@ -134,7 +128,7 @@ namespace ARMeilleure.Instructions
                     _ => context.CompareAndSwap(physAddr, exValue, value)
                 };
 
-                // STEP 4: Check if we succeeded by comparing expected and in-memory values.
+                // STEP 3: Check if we succeeded by comparing expected and in-memory values.
                 Operand storeFailed;
 
                 if (size == 4)

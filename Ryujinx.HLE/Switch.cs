@@ -1,5 +1,7 @@
 using LibHac.FsSystem;
-using Ryujinx.Audio;
+using Ryujinx.Audio.Backends.CompatLayer;
+using Ryujinx.Audio.Integration;
+using Ryujinx.Common;
 using Ryujinx.Configuration;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Gpu;
@@ -12,6 +14,7 @@ using Ryujinx.HLE.HOS;
 using Ryujinx.HLE.HOS.Services;
 using Ryujinx.HLE.HOS.Services.Apm;
 using Ryujinx.HLE.HOS.Services.Hid;
+using Ryujinx.HLE.HOS.Services.Nv.NvDrvServices;
 using Ryujinx.HLE.HOS.SystemState;
 using Ryujinx.Memory;
 using System;
@@ -20,11 +23,13 @@ namespace Ryujinx.HLE
 {
     public class Switch : IDisposable
     {
-        public IAalOutput AudioOut { get; private set; }
+        public IHardwareDeviceDriver AudioDeviceDriver { get; private set; }
 
         internal MemoryBlock Memory { get; private set; }
 
         public GpuContext Gpu { get; private set; }
+
+        internal NvMemoryAllocator MemoryAllocator { get; private set; }
 
         internal Host1xDevice Host1x { get; }
 
@@ -44,16 +49,16 @@ namespace Ryujinx.HLE
 
         public bool EnableDeviceVsync { get; set; } = true;
 
-        public Switch(VirtualFileSystem fileSystem, ContentManager contentManager, UserChannelPersistence userChannelPersistence, IRenderer renderer, IAalOutput audioOut)
+        public Switch(VirtualFileSystem fileSystem, ContentManager contentManager, UserChannelPersistence userChannelPersistence, IRenderer renderer, IHardwareDeviceDriver audioDeviceDriver)
         {
             if (renderer == null)
             {
                 throw new ArgumentNullException(nameof(renderer));
             }
 
-            if (audioOut == null)
+            if (audioDeviceDriver == null)
             {
-                throw new ArgumentNullException(nameof(audioOut));
+                throw new ArgumentNullException(nameof(audioDeviceDriver));
             }
 
             if (userChannelPersistence == null)
@@ -63,11 +68,13 @@ namespace Ryujinx.HLE
 
             UserChannelPersistence = userChannelPersistence;
 
-            AudioOut = audioOut;
+            AudioDeviceDriver = new CompatLayerHardwareDeviceDriver(audioDeviceDriver);
 
             Memory = new MemoryBlock(1UL << 32);
 
             Gpu = new GpuContext(renderer);
+
+            MemoryAllocator = new NvMemoryAllocator();
 
             Host1x = new Host1xDevice(Gpu.Synchronization);
             var nvdec = new NvdecDevice(Gpu.MemoryManager);
@@ -93,6 +100,7 @@ namespace Ryujinx.HLE
             FileSystem = fileSystem;
 
             System = new Horizon(this, contentManager);
+            System.InitializeServices();
 
             Statistics = new PerformanceStatistics();
 
@@ -114,11 +122,6 @@ namespace Ryujinx.HLE
 
             System.PerformanceState.PerformanceMode = System.State.DockedMode ? PerformanceMode.Boost : PerformanceMode.Default;
 
-            if (ConfigurationState.Instance.System.EnableMulticoreScheduling)
-            {
-                System.EnableMultiCoreScheduling();
-            }
-
             System.EnablePtc = ConfigurationState.Instance.System.EnablePtc;
 
             System.FsIntegrityCheckLevel = GetIntegrityCheckLevel();
@@ -126,6 +129,10 @@ namespace Ryujinx.HLE
             System.GlobalAccessLogMode = ConfigurationState.Instance.System.FsGlobalAccessLogMode;
 
             ServiceConfiguration.IgnoreMissingServices = ConfigurationState.Instance.System.IgnoreMissingServices;
+            ConfigurationState.Instance.System.IgnoreMissingServices.Event += (object _, ReactiveEventArgs<bool> args) =>
+            {
+                ServiceConfiguration.IgnoreMissingServices = args.NewValue;
+            };
 
             // Configure controllers
             Hid.RefreshInputConfig(ConfigurationState.Instance.Hid.InputConfig.Value);
@@ -176,6 +183,11 @@ namespace Ryujinx.HLE
             Gpu.GPFifo.DispatchCalls();
         }
 
+        public bool ConsumeFrameAvailable()
+        {
+            return Gpu.Window.ConsumeFrameAvailable();
+        }
+
         public void PresentFrame(Action swapBuffersCallback)
         {
             Gpu.Window.Present(swapBuffersCallback);
@@ -199,7 +211,7 @@ namespace Ryujinx.HLE
 
                 System.Dispose();
                 Host1x.Dispose();
-                AudioOut.Dispose();
+                AudioDeviceDriver.Dispose();
                 FileSystem.Unload();
                 Memory.Dispose();
             }
